@@ -2256,6 +2256,12 @@ export const jaOverrides = {
     }
   },
 
+  keybinds: {
+    actions: {
+      'view.copySelection': '選択範囲をコピー'
+    }
+  },
+
   composer: {
     message: 'メッセージ',
     wakingProfile: profile => `${profile} を起動中…`,
