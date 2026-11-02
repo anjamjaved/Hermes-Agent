@@ -74,8 +74,26 @@ export const jaDelegationRouting: DelegationRoutingTranslations = {
   tierFast: '高速',
   tierUltrafast: '超高速',
   tierHint: '対応しているモデルのみ。',
+  turnsLabel: 'ターン上限',
+  turnsPlaceholder: 'グローバルの上限を使用',
+  turnsHint: 'このルートのサブエージェントの最大ターン数。',
+  timeoutLabel: 'タイムアウト（秒）',
+  timeoutPlaceholder: 'グローバルのタイムアウトを使用',
+  timeoutHint: 'このルートのサブエージェントを停止するまでの無操作秒数。0 で無効、30 未満の値は 30 になります。',
+  escalateLabel: '推論強度を引き上げる',
+  escalateHint: 'ターン上限またはタイムアウトに達したサブエージェントを、1 段階上の推論強度で再試行します。',
+  ceilingLabel: '引き上げの上限',
+  ceilingNone: '上限なし（オフ）',
+  ceilingHint:
+    '再試行で引き上げる最高レベル。上限がない場合は引き上げはオフのままです。現在の推論強度がすでに上限と同じ場合、再試行は行われません。',
   optional: '任意',
-  errors: { required: '必須', spaces: 'スペースは使えません', duplicate: 'この名前は別のルートで使われています' },
+  errors: {
+    required: '必須',
+    spaces: 'スペースは使えません',
+    duplicate: 'この名前は別のルートで使われています',
+    turns: '1 以上の整数を入力してください。',
+    seconds: '0 以上の数値を入力してください。'
+  },
   saveRoute: 'ルートを保存',
   createRoute: 'ルートを追加',
 

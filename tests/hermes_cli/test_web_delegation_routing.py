@@ -132,6 +132,18 @@ def test_a_managed_install_refuses_every_routing_write_with_the_reason(client, h
     ([{"name": "a", "description": "x", "model": "m"}], "provider"),
     ([{"name": "a", "description": "x", "provider": "p", "model": "m", "service_tier": "warp"}], "service tier"),
     ([{"name": "a", "description": "x", "provider": "p", "model": "m", "reasoning_effort": "huge"}], "reasoning"),
+    ([{"name": "a", "description": "x", "provider": "p", "model": "m", "max_iterations": 0}], "max_iterations"),
+    ([{"name": "a", "description": "x", "provider": "p", "model": "m", "max_iterations": "abc"}], "max_iterations"),
+    ([{"name": "a", "description": "x", "provider": "p", "model": "m", "child_timeout_seconds": -5}], "child_timeout_seconds"),
+    ([{"name": "a", "description": "x", "provider": "p", "model": "m", "child_timeout_seconds": "soon"}], "child_timeout_seconds"),
+    ([{"name": "a", "description": "x", "provider": "p", "model": "m", "max_iterations": True}], "max_iterations"),
+    ([{"name": "a", "description": "x", "provider": "p", "model": "m", "max_iterations": "²"}], "max_iterations"),
+    ([{"name": "a", "description": "x", "provider": "p", "model": "m", "child_timeout_seconds": "nan"}], "child_timeout_seconds"),
+    ([{"name": "a", "description": "x", "provider": "p", "model": "m", "child_timeout_seconds": "inf"}], "child_timeout_seconds"),
+    ([{"name": "a", "description": "x", "provider": "p", "model": "m", "child_timeout_seconds": True}], "child_timeout_seconds"),
+    ([{"name": "a", "description": "x", "provider": "p", "model": "m", "child_timeout_seconds": 10**400}], "child_timeout_seconds"),
+    ([{"name": "a", "description": "x", "provider": "p", "model": "m", "max_iterations": 2**53}], "max_iterations"),
+    ([{"name": "a", "description": "x", "provider": "p", "model": "m", "max_iterations": "9" * 5000}], "max_iterations"),
 ])
 def test_invalid_model_routes_are_refused_before_anything_is_written(client, homes, options, problem):
     _root, work = homes
@@ -139,6 +151,68 @@ def test_invalid_model_routes_are_refused_before_anything_is_written(client, hom
     resp = client.put("/api/delegation/backends/model_map?profile=work", json={"options": options})
     assert resp.status_code == 400
     assert problem in resp.json()["detail"]
+    assert len(resp.json()["detail"]) < 200
+    assert (work / "config.yaml").read_text(encoding="utf-8") == before
+
+
+@pytest.mark.parametrize("sent", [True, False, None])
+def test_route_escalate_reasoning_only_saves_true(client, homes, sent):
+    _root, work = homes
+    option = {"name": "scout", "description": "Quick look", "provider": "openrouter", "model": "m",
+              "escalate_reasoning": sent}
+    resp = client.put("/api/delegation/backends/model_map?profile=work", json={"options": [option]})
+    assert resp.status_code == 200, resp.text
+    (saved,) = _delegation(work)["backends"]["model_map"]["options"]
+    (returned,) = resp.json()["model_map"]["options"]
+    for row in (saved, returned):
+        if sent is True:
+            assert row["escalate_reasoning"] is True
+        else:
+            assert "escalate_reasoning" not in row
+
+
+@pytest.mark.parametrize("sent", ["false", "true", 1, 0])
+def test_route_escalate_reasoning_rejects_non_booleans(client, homes, sent):
+    _root, work = homes
+    before = (work / "config.yaml").read_text(encoding="utf-8")
+    option = {"name": "scout", "description": "Quick look", "provider": "openrouter", "model": "m",
+              "escalate_reasoning": sent}
+    resp = client.put("/api/delegation/backends/model_map?profile=work", json={"options": [option]})
+    assert resp.status_code == 400
+    assert "escalate_reasoning" in resp.json()["detail"]
+    assert (work / "config.yaml").read_text(encoding="utf-8") == before
+
+
+@pytest.mark.parametrize("sent", [
+    "none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra",
+    " NONE ", " MINIMAL ", " LOW ", " MEDIUM ", " HIGH ", " XHIGH ", " MAX ", " ULTRA ",
+    "", "   ", None,
+])
+def test_route_escalate_ceiling_is_normalized(client, homes, sent):
+    _root, work = homes
+    option = {"name": "scout", "description": "Quick look", "provider": "openrouter", "model": "m",
+              "escalate_ceiling": sent}
+    resp = client.put("/api/delegation/backends/model_map?profile=work", json={"options": [option]})
+    assert resp.status_code == 200, resp.text
+    (saved,) = _delegation(work)["backends"]["model_map"]["options"]
+    (returned,) = resp.json()["model_map"]["options"]
+    expected = sent.strip().lower() if sent is not None else ""
+    for row in (saved, returned):
+        if expected:
+            assert row["escalate_ceiling"] == expected
+        else:
+            assert "escalate_ceiling" not in row
+
+
+@pytest.mark.parametrize("sent", ["huge", True, False, 1, 0, [], {}])
+def test_route_escalate_ceiling_rejects_invalid_values(client, homes, sent):
+    _root, work = homes
+    before = (work / "config.yaml").read_text(encoding="utf-8")
+    option = {"name": "scout", "description": "Quick look", "provider": "openrouter", "model": "m",
+              "escalate_ceiling": sent}
+    resp = client.put("/api/delegation/backends/model_map?profile=work", json={"options": [option]})
+    assert resp.status_code == 400
+    assert "escalate_ceiling" in resp.json()["detail"]
     assert (work / "config.yaml").read_text(encoding="utf-8") == before
 
 
@@ -178,3 +252,30 @@ def test_profile_routes_only_name_existing_profiles(client, homes):
     assert resp.status_code == 200, resp.text
     assert _delegation(work)["backends"]["profile_routes"] == {
         "profiles": [{"name": "default", "description": "The main one"}], "default": "default"}
+
+
+@pytest.mark.parametrize("sent, stored", [(15, 15), ("15", 15), (" 15 ", 15), (2**53 - 1, 2**53 - 1), ("", None), (None, None)])
+def test_route_max_iterations_is_saved_as_a_whole_number(client, homes, sent, stored):
+    _root, work = homes
+    option = {"name": "scout", "description": "Quick look", "provider": "openrouter", "model": "m"}
+    if sent is not None:
+        option["max_iterations"] = sent
+    resp = client.put("/api/delegation/backends/model_map?profile=work", json={"options": [option]})
+    assert resp.status_code == 200, resp.text
+    (saved,) = _delegation(work)["backends"]["model_map"]["options"]
+    assert saved.get("max_iterations") == stored
+
+
+@pytest.mark.parametrize(
+    "sent, stored",
+    [(300, 300), ("300", 300), (" 300 ", 300), (0, 0), ("0", 0), (2.5, 2.5), ("", None), (None, None)],
+)
+def test_route_child_timeout_is_saved_as_a_number(client, homes, sent, stored):
+    _root, work = homes
+    option = {"name": "scout", "description": "Quick look", "provider": "openrouter", "model": "m"}
+    if sent is not None:
+        option["child_timeout_seconds"] = sent
+    resp = client.put("/api/delegation/backends/model_map?profile=work", json={"options": [option]})
+    assert resp.status_code == 200, resp.text
+    (saved,) = _delegation(work)["backends"]["model_map"]["options"]
+    assert saved.get("child_timeout_seconds") == stored

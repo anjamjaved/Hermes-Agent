@@ -75,11 +75,27 @@ export const deDelegationRouting: DelegationRoutingTranslations = {
   tierFast: 'Schnell',
   tierUltrafast: 'Ultraschnell',
   tierHint: 'Nur bei Modellen, die das anbieten.',
+  turnsLabel: 'Rundenlimit',
+  turnsPlaceholder: 'Verwendet das globale Limit',
+  turnsHint: 'Maximale Anzahl Runden für einen Subagenten auf dieser Route.',
+  timeoutLabel: 'Zeitlimit (Sekunden)',
+  timeoutPlaceholder: 'Verwendet das globale Zeitlimit',
+  timeoutHint:
+    'Sekunden ohne Aktivität, bevor ein Subagent auf dieser Route gestoppt wird. 0 schaltet es aus; Werte unter 30 werden zu 30.',
+  escalateLabel: 'Denkanstrengung erhöhen',
+  escalateHint:
+    'Einen Subagenten, der sein Runden- oder Zeitlimit erreicht, mit der nächsthöheren Denkanstrengung erneut ausführen.',
+  ceilingLabel: 'Obergrenze der Erhöhung',
+  ceilingNone: 'Keine Obergrenze (aus)',
+  ceilingHint:
+    'Höchste Stufe, bis zu der ein erneuter Versuch steigt. Ohne Obergrenze bleibt die Erhöhung aus; entspricht die aktuelle Denkanstrengung bereits der Obergrenze, gibt es keinen erneuten Versuch.',
   optional: 'optional',
   errors: {
     required: 'Erforderlich',
     spaces: 'Keine Leerzeichen',
-    duplicate: 'Eine andere Route verwendet diesen Namen bereits'
+    duplicate: 'Eine andere Route verwendet diesen Namen bereits',
+    turns: 'Verwenden Sie eine ganze Zahl ab 1.',
+    seconds: 'Verwenden Sie eine Zahl ab 0.'
   },
   saveRoute: 'Route speichern',
   createRoute: 'Route hinzufügen',

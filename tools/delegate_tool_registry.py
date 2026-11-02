@@ -25,16 +25,22 @@ _active_subagents: dict[str, dict[str, Any]] = {}
 _RECENT_SUBAGENTS_CAP = 200
 _recent_subagents: dict[str, dict[str, Any]] = {}
 
+def task_subagent_id(task_id: str) -> str:
+    """The subagent a child's terminal task_id belongs to: a reasoning-escalation retry runs under
+    ``<subagent_id>-attempt-N`` (its own terminal session), every other child under its subagent_id."""
+    return task_id.split("-attempt-", 1)[0]
+
 def get_subagent_attribution(task_id: Optional[str]) -> Optional[dict[str, Any]]:
     """``{subagent_id, goal, delegation_id}`` for a process task_id that belongs to a live or recently-finished child
     (children run their terminal sessions under ``task_id == subagent_id``), else None."""
     if not task_id or not isinstance(task_id, str):
         return None
+    subagent_id = task_subagent_id(task_id)
     with _active_subagents_lock:
-        record = _active_subagents.get(task_id) or _recent_subagents.get(task_id)
+        record = _active_subagents.get(subagent_id) or _recent_subagents.get(subagent_id)
     if record is None:
         return None
-    return {"subagent_id": task_id, "goal": record.get("goal"), "delegation_id": record.get("delegation_id")}
+    return {"subagent_id": subagent_id, "goal": record.get("goal"), "delegation_id": record.get("delegation_id")}
 
 def set_spawn_paused(paused: bool) -> bool:
     """Globally block/unblock NEW delegate_task spawns (active children keep running). Returns the new state."""
@@ -95,9 +101,16 @@ def interrupt_subagent(subagent_id: str) -> bool:
     grandchildren via AIAgent.interrupt()). True iff a matching subagent was found."""
     with _active_subagents_lock:
         record = _active_subagents.get(subagent_id)
-    agent = record.get("agent") if record else None
-    if agent is None:
-        return False
+        agent = record.get("agent") if record else None
+        if agent is None:
+            return False
+        # The stop ends the subagent, not just its current attempt: a reasoning-escalation chain checks this mark
+        # before it starts (or after it builds) the next attempt. A later attempt also marks the chain's first one,
+        # whose mark every next attempt's admission reads — so a stop landing after a retry was queued still holds.
+        agent._delegate_unit_cancelled = True
+        first_attempt = getattr(agent, "_delegate_first_attempt", None)
+        if first_attempt is not None:
+            first_attempt._delegate_unit_cancelled = True
     try:
         return bool(request_hard_interrupt(agent, f"Interrupted via TUI ({subagent_id})"))
     except Exception as exc:

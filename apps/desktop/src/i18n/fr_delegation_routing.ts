@@ -77,8 +77,28 @@ export const frDelegationRouting: DelegationRoutingTranslations = {
   tierFast: 'Rapide',
   tierUltrafast: 'Ultra-rapide',
   tierHint: 'Uniquement sur les modèles qui la proposent.',
+  turnsLabel: 'Limite de tours',
+  turnsPlaceholder: 'Utilise la limite globale',
+  turnsHint: 'Nombre maximal de tours pour un sous-agent sur cette route.',
+  timeoutLabel: 'Délai (secondes)',
+  timeoutPlaceholder: 'Utilise le délai global',
+  timeoutHint:
+    'Secondes d’inactivité avant l’arrêt d’un sous-agent sur cette route. 0 le désactive ; les valeurs inférieures à 30 valent 30.',
+  escalateLabel: 'Augmenter le raisonnement',
+  escalateHint:
+    'Relance un sous-agent qui atteint sa limite de tours ou son délai d’inactivité avec l’intensité du raisonnement suivante.',
+  ceilingLabel: 'Plafond d’augmentation',
+  ceilingNone: 'Aucun plafond (désactivé)',
+  ceilingHint:
+    'Niveau maximal atteint par une relance. Sans plafond, l’augmentation reste désactivée ; si l’intensité actuelle est déjà égale au plafond, aucune relance n’a lieu.',
   optional: 'facultatif',
-  errors: { required: 'Obligatoire', spaces: "Pas d'espaces", duplicate: 'Une autre route utilise déjà ce nom' },
+  errors: {
+    required: 'Obligatoire',
+    spaces: "Pas d'espaces",
+    duplicate: 'Une autre route utilise déjà ce nom',
+    turns: 'Utilisez un nombre entier supérieur ou égal à 1.',
+    seconds: 'Utilisez un nombre supérieur ou égal à 0.'
+  },
   saveRoute: 'Enregistrer la route',
   createRoute: 'Ajouter une route',
 

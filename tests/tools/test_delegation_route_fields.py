@@ -194,3 +194,208 @@ def test_an_inherited_fast_tier_is_reported_as_what_ran():
     entry = _build_result_entry(child, {"final_response": "ok", "completed": True}, 0, 1.0,
                                 _SchemaOutcome(None, None, [], 0))
     assert entry["route"]["service_tier"] == "fast"
+
+
+def test_route_max_iterations_beats_the_global_and_a_sibling_keeps_the_global():
+    result, (capped, plain), _ = _spawn([{**LOCAL, "max_iterations": 7}, None], cfg={"max_iterations": 40})
+    assert result == {"status": "built"}
+    assert capped["max_iterations"] == 7
+    assert plain["max_iterations"] == 40
+
+
+def test_a_route_without_max_iterations_uses_the_global():
+    _result, (child,), _ = _spawn([dict(LOCAL)], cfg={"max_iterations": 40})
+    assert child["max_iterations"] == 40
+
+
+@pytest.mark.parametrize("bad", [0, -3, "15", 2.5, True])
+def test_a_bad_route_max_iterations_refuses_that_task_and_its_sibling_runs(bad):
+    result, built, _ = _spawn([{**LOCAL, "max_iterations": bad}, None], cfg={"max_iterations": 40})
+    (refused,) = result["refused"]
+    assert refused["task_index"] == 0
+    assert "max_iterations" in refused["error"]
+    assert len(built) == 1
+
+
+def test_the_delegation_sections_own_max_iterations_is_not_a_route_error():
+    """A backend that falls back to ``dict(config)`` carries the config's value: a bad global keeps its old
+    behaviour (delegate_task's own read) instead of refusing the task as a route error."""
+    result, (child,), _ = _spawn([None], cfg={"max_iterations": "40"})
+    assert result == {"status": "built"}
+    assert child["max_iterations"] == "40"
+
+
+def test_limits_equal_to_the_delegation_sections_own_are_dropped_from_the_route_once():
+    """``resolve_task_routes`` strips a limit that echoes the ``delegation`` section (a ``dict(config)`` fallback
+    route carries both) so the child reads the globals itself; a pin that differs stays as routed."""
+    from tools.delegate_tool_routes import resolve_task_routes
+    cfg = {"max_iterations": 40, "child_timeout_seconds": 1400}
+    routes = [None, {**LOCAL, "max_iterations": 40, "child_timeout_seconds": 1400},
+              {**LOCAL, "max_iterations": 7, "child_timeout_seconds": 1400.0}]
+    with patch("tools.delegate_tool_routes._active_provider", return_value=_Backend(routes)):
+        (default, echo, pinned), error = resolve_task_routes([{"goal": "t"}] * 3, cfg, _parent())
+    assert error is None and not any(r.error for r in (default, echo, pinned))
+    assert (default.max_iterations, default.child_timeout_seconds) == (None, None)
+    assert (echo.max_iterations, echo.child_timeout_seconds) == (None, None)
+    assert (pinned.max_iterations, pinned.child_timeout_seconds) == (7, 1400.0)  # a float is not the int's echo
+
+
+def test_a_profile_route_is_not_checked_for_max_iterations():
+    from tools.delegate_tool_routes import _check_route_max_iterations
+    _check_route_max_iterations(0, {"profile": "work", "max_iterations": 0})  # no raise
+    with pytest.raises(ValueError, match="max_iterations"):
+        _check_route_max_iterations(0, {"max_iterations": 0})
+
+
+def test_route_child_timeout_is_pinned_on_the_child_and_a_sibling_is_not():
+    result, _, (capped, plain) = _spawn([{**LOCAL, "child_timeout_seconds": 300}, None],
+                                        cfg={"child_timeout_seconds": 1400})
+    assert result == {"status": "built"}
+    assert capped._delegate_child_timeout == 300
+    assert "_delegate_child_timeout" not in vars(plain)
+
+
+def test_a_route_child_timeout_of_zero_is_pinned_as_zero():
+    _result, _, (child,) = _spawn([{**LOCAL, "child_timeout_seconds": 0}], cfg={"child_timeout_seconds": 1400})
+    assert child._delegate_child_timeout == 0
+
+
+@pytest.mark.parametrize("bad", [-1, "300", True, [300], float("nan"), float("inf"), 10**400])
+def test_a_bad_route_child_timeout_refuses_that_task_and_its_sibling_runs(bad):
+    result, built, _ = _spawn([{**LOCAL, "child_timeout_seconds": bad}, None], cfg={"child_timeout_seconds": 1400})
+    (refused,) = result["refused"]
+    assert refused["task_index"] == 0
+    assert "child_timeout_seconds" in refused["error"]
+    assert len(built) == 1
+
+
+def test_the_delegation_sections_own_child_timeout_is_not_a_route_error():
+    result, _, (child,) = _spawn([None], cfg={"child_timeout_seconds": "1400"})
+    assert result == {"status": "built"}
+    assert "_delegate_child_timeout" not in vars(child)
+
+
+@pytest.mark.parametrize("enabled", [True, False, None])
+@pytest.mark.parametrize("ceiling", [None, "none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra", " HIGH "])
+def test_escalation_route_fields_resolve(enabled, ceiling):
+    from tools.delegate_tool_routes import resolve_task_routes
+    backend = _Backend([{**LOCAL, "escalate_reasoning": enabled, "escalate_ceiling": ceiling}, {}])
+    with patch("tools.delegate_tool_routes._active_provider", return_value=backend):
+        (routed, plain), error = resolve_task_routes([{"goal": "t"}] * 2, {}, _parent())
+    assert error is None and routed.error is None and plain.error is None
+    assert routed.escalate_reasoning is (enabled is True)
+    assert routed.escalate_ceiling == (ceiling.strip().lower() if ceiling is not None else None)
+    assert (plain.escalate_reasoning, plain.escalate_ceiling) == (False, None)
+
+
+@pytest.mark.parametrize("field,bad", [
+    ("escalate_reasoning", value) for value in ["false", "true", 1, 0, [], {}]
+] + [
+    ("escalate_ceiling", value) for value in ["huge", True, 1, "", " ", [], {}]
+])
+def test_bad_escalation_route_refuses_only_that_task(field, bad):
+    result, built, _ = _spawn([{**LOCAL, field: bad}, None])
+    (refused,) = result["refused"]
+    assert refused["task_index"] == 0
+    assert field in refused["error"]
+    assert len(built) == 1
+
+
+@pytest.mark.parametrize("fields", [
+    {"escalate_reasoning": True, "escalate_ceiling": "ultra"},
+    {"escalate_reasoning": "false", "escalate_ceiling": True},
+])
+def test_profile_routes_ignore_escalation_fields(fields, tmp_path):
+    from tools.delegate_tool_routes import TaskRoute, resolve_task_routes
+    with (
+        patch("tools.delegate_tool_routes._active_provider",
+              return_value=_Backend([{"profile": "work", **fields}])),
+        patch("tools.delegate_tool_routes._profile_home", return_value=tmp_path),
+        patch("tools.delegate_tool_routes._profile_route", return_value=TaskRoute({}, {}, profile_home=tmp_path)),
+    ):
+        (route,), error = resolve_task_routes([{"goal": "t"}], {}, _parent())
+    assert error is None and route.error is None
+    assert route.profile_home == tmp_path
+    assert (route.escalate_reasoning, route.escalate_ceiling) == (False, None)
+
+
+@pytest.mark.parametrize("fields", [
+    {"escalate_reasoning": True, "escalate_ceiling": "ultra"},
+    {"escalate_reasoning": "false", "escalate_ceiling": True},
+])
+def test_default_backend_ignores_escalation_section_globals(fields):
+    from agent.delegation_registry import get_active_provider
+    from tools.delegate_tool_routes import resolve_task_routes
+    with patch("tools.delegate_tool_routes._active_provider", return_value=get_active_provider({})):
+        (route,), error = resolve_task_routes([{"goal": "t"}], {**LOCAL, **fields}, _parent())
+    assert error is None and route.error is None
+    assert (route.escalate_reasoning, route.escalate_ceiling) == (False, None)
+    assert "escalate_reasoning" not in route.routing_cfg
+    assert "escalate_ceiling" not in route.routing_cfg
+
+
+def test_a_profile_route_is_not_checked_for_child_timeout():
+    from tools.delegate_tool_routes import _check_route_child_timeout
+    _check_route_child_timeout(0, {"profile": "work", "child_timeout_seconds": -1})
+    with pytest.raises(ValueError, match="child_timeout_seconds"):
+        _check_route_child_timeout(0, {"child_timeout_seconds": -1})
+
+
+def test_escalation_is_pinned_on_the_child_and_a_sibling_is_untouched():
+    _result, _, (esc, plain) = _spawn([{**LOCAL, "escalate_reasoning": True, "escalate_ceiling": "xhigh"}, None])
+    assert esc._delegate_escalate_reasoning is True and esc._delegate_escalate_ceiling == "xhigh"
+    assert callable(esc._delegate_build_retry)
+    for attr in ("_delegate_escalate_reasoning", "_delegate_escalate_ceiling", "_delegate_build_retry"):
+        assert attr not in vars(plain)
+
+
+@pytest.mark.parametrize("fields, pinned", [
+    ({"escalate_reasoning": True}, {"_delegate_escalate_reasoning": True}),
+    ({"escalate_ceiling": "high"}, {"_delegate_escalate_ceiling": "high"}),
+    ({"escalate_reasoning": False, "escalate_ceiling": "high"}, {"_delegate_escalate_ceiling": "high"}),
+])
+def test_half_configured_escalation_pins_what_it_has_and_no_retry_builder(fields, pinned):
+    _result, _, (child,) = _spawn([{**LOCAL, **fields}])
+    escalation = {k: v for k, v in vars(child).items() if k.startswith("_delegate_escalate")}
+    assert escalation == pinned
+    assert "_delegate_build_retry" not in vars(child)
+
+
+def test_the_retry_builder_rebuilds_the_same_route_with_only_effort_changed():
+    """Same goal, limits, tier, transcript and delegation id; only the reasoning level differs (the handoff is the
+    retry's first user message, not build input), and the route itself keeps its own reasoning_effort."""
+    from tools import delegate_tool_routes
+    seen_routes = []
+    real_resolve = delegate_tool_routes.resolve_task_routes
+
+    def resolve(*a, **k):
+        routes, err = real_resolve(*a, **k)
+        seen_routes.extend(routes)
+        return routes, err
+
+    route = {**CODEX, "model": "gpt-5.6", "reasoning_effort": "low", "service_tier": "fast", "max_iterations": 7,
+             "child_timeout_seconds": 300, "escalate_reasoning": True, "escalate_ceiling": "max", "label": "deep"}
+    batches = []
+    with (
+        patch("tools.delegate_tool._load_config", return_value={"max_iterations": 40}),
+        patch("tools.delegate_tool_routes._active_provider", return_value=_Backend([route])),
+        patch("tools.delegate_tool_routes.resolve_task_routes", side_effect=resolve),
+        patch("run_agent.AIAgent", side_effect=_construct) as agent,
+        patch("tools.delegate_tool._run_batch", side_effect=lambda batch, background: batches.append(batch) or "{}"),
+    ):
+        from tools.delegate_tool import delegate_task
+        delegate_task(tasks=[{"goal": "original goal", "output_schema": {"type": "object"}}], parent_agent=_parent())
+        (_, _, first), = batches[0].children
+        retry = first._delegate_build_retry("medium")
+    first_kw, retry_kw = (call.kwargs for call in agent.call_args_list)
+    assert first_kw["reasoning_config"] == {"enabled": True, "effort": "low"}
+    assert retry_kw["reasoning_config"] == {"enabled": True, "effort": "medium"}
+    differing = {k for k in first_kw if first_kw[k] != retry_kw[k]}
+    assert differing <= {"reasoning_config", "tool_progress_callback", "thinking_callback"}
+    assert retry_kw["max_iterations"] == 7 and retry_kw["service_tier"] == first_kw["service_tier"] == "priority"
+    for attr in ("_delegate_child_timeout", "_live_transcript_path", "_delegation_id", "_delegate_output_schema",
+                 "_delegate_escalate_reasoning", "_delegate_escalate_ceiling"):
+        assert getattr(retry, attr) == getattr(first, attr), attr
+    assert callable(retry._delegate_build_retry)
+    (task_route,) = seen_routes
+    assert task_route.reasoning_effort == "low" and task_route.routing_cfg["reasoning_effort"] == "low"

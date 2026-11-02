@@ -13,12 +13,13 @@ import contextlib
 import json
 import logging
 import re
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Iterator, Mapping, Optional
 
 from agent.delegation_provider import (
-    RESERVED_TASK_PARAMETERS, ROUTE_KEYS, DelegationProvider, DelegationRouteError,
+    RESERVED_TASK_PARAMETERS, ROUTE_KEYS, DelegationProvider, DelegationRouteError, valid_route_child_timeout,
+    valid_route_max_iterations, valid_route_escalate_reasoning, valid_route_escalate_ceiling,
 )
 
 logger = logging.getLogger("tools.delegate_tool")  # log-record parity with the origin module
@@ -39,6 +40,14 @@ class TaskRoute:
     label: Optional[str] = None
     backend: str = "default"
     error: Optional[str] = None
+    max_iterations: Optional[int] = None
+    child_timeout_seconds: Optional[float] = None
+    escalate_reasoning: bool = False
+    escalate_ceiling: Optional[str] = None
+    # The provider (and the config it routed with) that produced this route: a budget stop asks it, not whatever
+    # backend is saved by then, for ``next_attempt``.
+    provider: Any = field(default=None, repr=False, compare=False)
+    provider_config: Optional[Mapping[str, Any]] = field(default=None, repr=False, compare=False)
 
     def report(self) -> Optional[dict[str, Any]]:
         """The ``route`` a backend-routed task's result carries (None for the default backend's unlabelled route)."""
@@ -187,9 +196,37 @@ def _refuse_under_worker_snapshot(home: Path) -> None:
             f"cannot run as the profile at {home}. Delegate without a profile.")
 
 
+def _profile_limits(cfg: Mapping[str, Any], home: Path) -> tuple[int, float]:
+    """The target profile's own ``delegation.max_iterations`` and ``delegation.child_timeout_seconds``. A profile
+    child runs on the profile's budget, never the launching profile's. Not set or not valid -> the built-in default
+    (250 turns, no idle timeout); 0 or less = no idle timeout. The timeout is returned as a pin (0.0 = no cap), so
+    the launching profile's global never applies to this child."""
+    from tools.delegate_tool import DEFAULT_MAX_ITERATIONS
+    section = cfg.get("delegation")
+    section = section if isinstance(section, Mapping) else {}
+    turns = section.get("max_iterations")
+    if not valid_route_max_iterations(turns):
+        if turns is not None:
+            logger.warning("Profile at %s: delegation.max_iterations=%r is not a whole number of 1 or more; "
+                           "using %d", home, turns, DEFAULT_MAX_ITERATIONS)
+        turns = DEFAULT_MAX_ITERATIONS
+    raw = section.get("child_timeout_seconds")
+    if raw is None:
+        seconds = 0.0
+    elif valid_route_child_timeout(raw):
+        seconds = float(raw)
+    elif isinstance(raw, (int, float)) and not isinstance(raw, bool) and raw < 0:
+        seconds = 0.0  # negative = no idle timeout, as delegation.child_timeout_seconds
+    else:
+        logger.warning("Profile at %s: delegation.child_timeout_seconds=%r is not a number of 0 or more; "
+                       "using no idle timeout", home, raw)
+        seconds = 0.0
+    return turns, seconds
+
+
 def _profile_route(home: Path) -> TaskRoute:
     """The profile's own primary route, resolved inside its scope (its config.yaml + secrets). The
-    child never borrows the launching profile's key, pool, fallback chain or reasoning level."""
+    child never borrows the launching profile's key, pool, fallback chain, reasoning level, turn limit or idle timeout."""
     from hermes_cli.config import load_config_readonly
     from hermes_cli.runtime_provider import resolve_runtime_provider
     from hermes_constants import resolve_reasoning_config
@@ -204,6 +241,7 @@ def _profile_route(home: Path) -> TaskRoute:
             raise DelegationRouteError(f"Profile at {home} has no usable model provider: {exc}") from exc
         model = request["target_model"] or rt.get("model") or None
         fallback = cfg.get("fallback_providers")
+        turns, idle = _profile_limits(cfg, home)
     # A named custom provider resolves to provider "custom": keep its name as the identity (as delegation.provider
     # does) so two named providers sharing one URL never lease each other's pool.
     requested = str(rt.get("requested_provider") or "").strip()
@@ -218,7 +256,8 @@ def _profile_route(home: Path) -> TaskRoute:
         command=rt.get("command"), args=list(rt.get("args") or []),
     )
     return TaskRoute(creds, {"fallback_providers": fallback if isinstance(fallback, list) else []},
-                     ResolvedReasoning(resolve_reasoning_config(cfg, model or "")), home)
+                     ResolvedReasoning(resolve_reasoning_config(cfg, model or "")), home,
+                     max_iterations=turns, child_timeout_seconds=idle)
 
 
 def _with_inherited_fallback(route: dict[str, Any], config: Mapping[str, Any]) -> dict[str, Any]:
@@ -238,7 +277,12 @@ def _resolve_route(route: dict[str, Any], parent_agent: Any, backend: str) -> Ta
     if route.get("service_tier") not in (None, ""):
         from tools.delegate_tool_tuning import task_service_tier
         creds = {**creds, **task_service_tier(str(route["service_tier"]), creds, parent_agent)}
-    return TaskRoute(creds, route, route.get("reasoning_effort"), None, None, backend)
+    return TaskRoute(creds, route, route.get("reasoning_effort"), None, None, backend,
+                     max_iterations=route.get("max_iterations"),
+                     child_timeout_seconds=route.get("child_timeout_seconds"),
+                     escalate_reasoning=route.get("escalate_reasoning") is True,
+                     escalate_ceiling=(route["escalate_ceiling"].strip().lower()
+                                       if isinstance(route.get("escalate_ceiling"), str) else None))
 
 
 def _route_to_task_route(route: dict[str, Any], parent_agent: Any, cache: dict[str, TaskRoute],
@@ -263,6 +307,61 @@ def _check_backend_effort(index: int, route: Mapping[str, Any], config: Mapping[
         raise DelegationRouteError(
             f"Task {index}: unknown reasoning_effort {effort!r} on this route. "
             f"Use none or one of: {', '.join(VALID_REASONING_EFFORTS)}.")
+
+
+_LIMIT_KEYS = ("max_iterations", "child_timeout_seconds")
+
+
+def _without_config_echoes(route: dict[str, Any], config: Mapping[str, Any]) -> dict[str, Any]:
+    """Drop limits equal to the ``delegation`` section's own (a ``dict(config)`` fallback route carries them):
+    delegate_task and the child run read those globals themselves, under the globals' own rules."""
+    echoes = {key for key in _LIMIT_KEYS if route.get(key) is not None
+              and type(route[key]) is type(config.get(key)) and route[key] == config.get(key)}
+    return {k: v for k, v in route.items() if k not in echoes} if echoes else route
+
+
+def _check_route_max_iterations(index: int, route: Mapping[str, Any]) -> None:
+    """A backend's ``max_iterations`` must be a whole number of 1 or more: a bad value refuses this task,
+    never falls back to the global limit. A profile route ignores the field, so it is not checked."""
+    value = route.get("max_iterations")
+    if value is None or route.get("profile"):
+        return
+    if not valid_route_max_iterations(value):
+        raise DelegationRouteError(
+            f"Task {index}: max_iterations on this route must be a whole number of 1 or more (got {value!r})."
+        )
+
+
+def _check_route_child_timeout(index: int, route: Mapping[str, Any]) -> None:
+    """A backend's ``child_timeout_seconds`` must be a number of 0 or more: a bad value refuses this task,
+    never falls back to the global timeout. A profile route ignores the field, so it is not checked."""
+    value = route.get("child_timeout_seconds")
+    if value is None or route.get("profile"):
+        return
+    if not valid_route_child_timeout(value):
+        raise DelegationRouteError(
+            f"Task {index}: child_timeout_seconds on this route must be a number of 0 or more (got {value!r})."
+        )
+
+
+def _check_route_escalate_reasoning(index: int, route: Mapping[str, Any]) -> None:
+    value = route.get("escalate_reasoning")
+    if value is None or route.get("profile"):
+        return
+    if not valid_route_escalate_reasoning(value):
+        raise DelegationRouteError(
+            f"Task {index}: escalate_reasoning on this route must be a boolean (got {value!r}).")
+
+
+def _check_route_escalate_ceiling(index: int, route: Mapping[str, Any]) -> None:
+    value = route.get("escalate_ceiling")
+    if value is None or route.get("profile"):
+        return
+    if not valid_route_escalate_ceiling(value):
+        from agent.reasoning_effort import EFFORT_LADDER
+        raise DelegationRouteError(
+            f"Task {index}: escalate_ceiling on this route must be one of {', '.join(EFFORT_LADDER)} "
+            f"(got {value!r}).")
 
 
 def _undeclared_error(provider: DelegationProvider, index: int, names: list[str], config: Mapping[str, Any]) -> str:
@@ -324,9 +423,14 @@ def resolve_task_routes(task_list: list[dict[str, Any]], config: Mapping[str, An
     routes: list[TaskRoute] = []
     for i, task in enumerate(task_list):
         try:
-            route = _route_one(provider, declared, i, task, config)
+            route = _without_config_echoes(_route_one(provider, declared, i, task, config), config)
             _check_backend_effort(i, route, config)
-            routes.append(_route_to_task_route(route, parent_agent, cache, config, provider.name))
+            _check_route_max_iterations(i, route)
+            _check_route_child_timeout(i, route)
+            _check_route_escalate_reasoning(i, route)
+            _check_route_escalate_ceiling(i, route)
+            routes.append(replace(_route_to_task_route(route, parent_agent, cache, config, provider.name),
+                                  provider=provider, provider_config=config))
         except ValueError as exc:  # DelegationRouteError, the credential resolver's and the tier check's refusals
             routes.append(TaskRoute({}, {}, backend=provider.name, error=str(exc)))
     return routes, None

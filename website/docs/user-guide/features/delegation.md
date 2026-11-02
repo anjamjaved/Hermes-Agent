@@ -320,6 +320,10 @@ delegation:
           model: claude-opus-5
           reasoning_effort: high
           service_tier: fast            # optional; refused at spawn if this route has no fast tier
+          max_iterations: 15            # optional; turn limit for this route, overrides delegation.max_iterations
+          child_timeout_seconds: 300    # optional; idle timeout for this route, overrides the global one
+          escalate_reasoning: true      # optional; route-only boolean, default false; needs escalate_ceiling too
+          escalate_ceiling: xhigh       # the highest level a retry may reach; alone it enables nothing
       default: fast                     # optional: option for tasks that set none
     profile_routes:                     # read when backend: profile_routes
       profiles:
@@ -327,9 +331,11 @@ delegation:
           description: Writes and refactors code; runs tests.
 ```
 
+`escalate_reasoning` is a route-only boolean, defaulting to `false`. Reasoning escalation runs on a model route only when it sets both `escalate_reasoning: true` and an `escalate_ceiling`; either one alone leaves escalation off. `escalate_ceiling` is trimmed and lowercased to a level on the ladder `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`, `ultra`. Invalid values refuse the task, and profile routes ignore both settings. A delegation backend plugin can change the retry decision; see the developer guide.
+
 The model only ever sees the names and descriptions you configured, never raw provider, model or key fields. Each result of a backend-routed task carries `route`: the backend, the option or profile name, and the provider, model, reasoning effort and speed tier the child actually ran on (`fallback_activated: true` when a fallback provider took over). Writing your own: [Delegation Provider Plugins](../../developer-guide/delegation-provider-plugin.md).
 
-**Failures are explicit, never a silent switch.** If the selected backend is missing (plugin not installed or disabled) or reports it cannot run, `delegate_task` returns a tool error naming the backend and the fix, and no subagent starts; it never quietly runs the children on the default route. Within a batch, a task its backend cannot route (an unknown option, a parameter the selected backend does not take, a profile that does not exist, a `service_tier` the route does not offer, an unknown `reasoning_effort`, missing credentials) is refused alone: its result entry has `status: "error"`, the reason, and `route.refused: true`, while the other tasks run. A model route without its own `fallback_providers` uses `delegation.fallback_providers`; `fallback_providers: []` on the route disables fallback for it. A profile route uses that profile's own fallback chain.
+**Failures are explicit, never a silent switch.** If the selected backend is missing (plugin not installed or disabled) or reports it cannot run, `delegate_task` returns a tool error naming the backend and the fix, and no subagent starts; it never quietly runs the children on the default route. Within a batch, a task its backend cannot route (an unknown option, a parameter the selected backend does not take, a profile that does not exist, a `service_tier` the route does not offer, an unknown `reasoning_effort`, a bad `max_iterations` or `child_timeout_seconds`, missing credentials) is refused alone: its result entry has `status: "error"`, the reason, and `route.refused: true`, while the other tasks run. A model route without its own `fallback_providers` uses `delegation.fallback_providers`; `fallback_providers: []` on the route disables fallback for it. A profile route uses that profile's own fallback chain, `delegation.max_iterations` and `delegation.child_timeout_seconds`.
 
 **Switching back.** `/delegation default` (from the `advanced-delegation` plugin) saves `delegation.backend` to `config.yaml` and applies from the next session (`/new`): a running chat keeps routing on the backend it started with, because the per-task choices the model sees (option or profile names) are part of the cached tool list and the two switch together. A hand edit of `delegation.backend` behaves the same. `/delegation <backend> --now` also rebuilds the current chat's tools at its next turn, so it routes on and offers the new backend from there, at the cost of one prompt-cache miss (context compression, which rebuilds the tools anyway, picks up the saved backend too). A task that sends a parameter its chat's backend does not take is refused with a message naming the backend, the parameter and the fix (`/delegation <backend> --now`, or `/new`); it never runs on the backend's default route. Without the plugin, `hermes config set delegation.backend default` restores the default.
 
@@ -395,7 +401,7 @@ delegation:
   max_iterations: 60   # lower it for fleets of simple tasks, raise it for long investigations
 ```
 
-A child that exhausts its budget returns with `exit_reason: max_iterations` and `truncated: true`, so the parent can tell a budget stop from a completed task.
+A child that exhausts its budget returns with `exit_reason: max_iterations` and `truncated: true`, so the parent can tell a budget stop from a completed task. A model route can override this per route; see [Delegation strategies](#delegation-strategies-delegationbackend).
 
 ## Child Timeout
 
@@ -411,7 +417,7 @@ delegation:
   # child_timeout_seconds: 1800  # opt-in inactivity cap (floor 30s)
 ```
 
-A positive value bounds **inactivity, not total runtime**: it is the longest a child may go with *no* progress (no completed API call, no tool change, no activity-clock tick) before it is abandoned. Every sign of progress restarts the window, so a child waiting on a multi-minute completion — the case that used to lose finished work — is never killed for taking long, while a child that has genuinely stopped moving is still caught (and an in-flight request is bounded independently by the per-call stale watchdog). `0` or a negative value disables the cap; the heartbeat staleness monitor below stays active either way.
+A positive value bounds **inactivity, not total runtime**: it is the longest a child may go with *no* progress (no completed API call, no tool change, no activity-clock tick) before it is abandoned. Every sign of progress restarts the window, so a child waiting on a multi-minute completion — the case that used to lose finished work — is never killed for taking long, while a child that has genuinely stopped moving is still caught (and an in-flight request is bounded independently by the per-call stale watchdog). `0` or a negative value disables the cap; the heartbeat staleness monitor below stays active either way. A model route can override this per route; see [Delegation strategies](#delegation-strategies-delegationbackend).
 
 At ~80% of an idle window the child receives a one-line `[delegation budget warning]` through its steer channel (delivered at its next iteration boundary) telling it how long it has been idle and to return its summary now, so a slow-but-recoverable child can wrap up instead of losing its context. The warning fires once per idle window and re-arms when progress resumes.
 

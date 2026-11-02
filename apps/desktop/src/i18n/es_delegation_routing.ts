@@ -78,8 +78,28 @@ export const esDelegationRouting: DelegationRoutingTranslations = {
   tierFast: 'Rápida',
   tierUltrafast: 'Ultrarrápida',
   tierHint: 'Solo en modelos que la ofrecen.',
+  turnsLabel: 'Límite de turnos',
+  turnsPlaceholder: 'Usa el límite global',
+  turnsHint: 'Turnos máximos para un subagente en esta ruta.',
+  timeoutLabel: 'Tiempo de espera (segundos)',
+  timeoutPlaceholder: 'Usa el tiempo de espera global',
+  timeoutHint:
+    'Segundos de inactividad antes de detener un subagente en esta ruta. 0 lo desactiva; los valores menores que 30 usan 30.',
+  escalateLabel: 'Escalar el razonamiento',
+  escalateHint:
+    'Reintenta un subagente que alcanza su límite de turnos o tiempo de espera con el siguiente nivel de esfuerzo de razonamiento.',
+  ceilingLabel: 'Límite de escalado',
+  ceilingNone: 'Sin límite (desactivado)',
+  ceilingHint:
+    'Nivel más alto al que sube un reintento. Sin límite, el escalado queda desactivado; si el esfuerzo actual ya es igual al límite, no se reintenta.',
   optional: 'opcional',
-  errors: { required: 'Obligatorio', spaces: 'Sin espacios', duplicate: 'Otra ruta ya usa este nombre' },
+  errors: {
+    required: 'Obligatorio',
+    spaces: 'Sin espacios',
+    duplicate: 'Otra ruta ya usa este nombre',
+    turns: 'Usa un número entero de 1 o más.',
+    seconds: 'Usa un número de 0 o más.'
+  },
   saveRoute: 'Guardar ruta',
   createRoute: 'Añadir ruta',
 

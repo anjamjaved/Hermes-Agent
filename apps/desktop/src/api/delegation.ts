@@ -22,6 +22,14 @@ export interface DelegationModelRoute {
   base_url?: string
   reasoning_effort?: string
   service_tier?: string
+  /** Turn limit for a child on this route; unset = delegation.max_iterations. */
+  max_iterations?: number
+  /** Idle timeout in seconds for a child on this route; 0 disables; unset = delegation.child_timeout_seconds. */
+  child_timeout_seconds?: number
+  /** Retry a budget-stopped child on the next reasoning level up to `escalate_ceiling`. */
+  escalate_reasoning?: boolean
+  /** Highest reasoning level escalation may step up to (`REASONING_EFFORT_VALUES`). */
+  escalate_ceiling?: string
   /** Display-only preview when set; sending it back keeps the stored key. */
   api_key?: string
   fallback_providers?: unknown[]
