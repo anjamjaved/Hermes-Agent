@@ -2283,8 +2283,10 @@ export interface VaultItem {
   identifier?: string | null
   identifier_type?: string | null
   has_otp?: boolean | null
+  origin_match?: VaultOriginMatch | null
   backend: string
 }
+export type VaultOriginMatch = 'exact' | 'any_site'
 export interface VaultSourcesResult {
   sources?: VaultSource[]
 }
