@@ -23,6 +23,26 @@ def _pm_generation_dirs(prefixes) -> set[Path]:
     return found
 
 
+def _checkout_git_dir(root: Path) -> set[Path]:
+    """A linked worktree's private git dir, which lives OUTSIDE *root*.
+
+    An ordinary clone's ``.git`` is a directory inside the checkout and is already exempt with it.
+    A linked worktree instead has a ``.git`` FILE naming ``<main checkout>/.git/worktrees/<name>``,
+    so recovery's ``interrupted_pull_marker()`` reads a path outside the exempted checkout. That is
+    the checkout's own metadata, not Hermes state.
+    """
+    try:
+        text = (root / ".git").read_text(encoding="utf-8-sig").strip()
+    except OSError:  # absent, or a directory (an ordinary clone)
+        return set()
+    if not text.startswith("gitdir:"):
+        return set()
+    return {(root / text[len("gitdir:"):].strip()).resolve()}
+
+
+_CHECKOUT_ROOT = Path(__file__).resolve().parent.parent
+
+
 _INTERPRETER_PREFIXES = tuple({
     Path(p).resolve() for p in (sys.prefix, sys.base_prefix, sys.exec_prefix, sys.base_exec_prefix)
 } | {
@@ -41,13 +61,62 @@ _INTERPRETER_PREFIXES = tuple({
     # INSTALL_DIR=$HERMES_HOME/hermes-agent). Reading test data, sources for tracebacks, or the
     # checkout's own .venv is not Hermes state; without this every run from a default install
     # trips on its first traceback.
-    Path(__file__).resolve().parent.parent,
+    _CHECKOUT_ROOT,
 })
 # The same prefixes as plain strings for the check() fast path. PurePath comparison folds case on
 # Windows; ``os.path.normcase`` (identity on POSIX) reproduces that for string compares. Prefixes
 # resolve once at import, as before: they are fixed for the process lifetime.
 _normcase = os.path.normcase
 _INTERPRETER_PREFIX_STRS = tuple(_normcase(os.fspath(p)) for p in _INTERPRETER_PREFIXES)
+
+# A linked worktree keeps its git dir OUTSIDE the checkout (``.git`` is a file naming
+# ``<main checkout>/.git/worktrees/<name>``), so the checkout exemption above does not reach the
+# interrupted-pull marker that recovery reads at import. That directory is the checkout's own
+# metadata, exactly like an ordinary clone's in-root ``.git``: reads are exempt, changes are not.
+_CHECKOUT_GIT_DIRS = frozenset(_normcase(os.fspath(d)) for d in _checkout_git_dir(_CHECKOUT_ROOT))
+
+# Install-layout markers beside a tree: a sealed payload ships ``manifest.json`` (repo/venv/store)
+# in the directory ABOVE the tree (scripts/build/agent.py), an install records ``install-stamp.json``
+# beside it, and PM's payload_venv()/store_root() probe both to find the environment and store for
+# the tree they serve. The default install checks the repo out INSIDE the home, so those probes land
+# in a guarded root even though they ask about the installation, not user state. Reads are allowed
+# there — the manifest only counts when it names this checkout as its repo — and writes stay refused.
+_LAYOUT_MARKERS = frozenset({"manifest.json", "install-stamp.json"})
+_LAYOUT_DIRS = frozenset(
+    _normcase(os.fspath(directory))
+    for directory in (_CHECKOUT_ROOT, *_CHECKOUT_ROOT.parents)
+)
+
+# A launch with a temporary HERMES_HOME still BORROWS the owning root's dependency store
+# (pm/environments.py: owning_home_root) instead of reinstalling: ``installs/<key>/facts.json``,
+# the managed node runtime and the package caches are what that borrow reads. Probing them is the
+# product's design, not a test reaching into user state, and a checkout under a home (install.sh)
+# makes the probes unavoidable there. Reads are allowed; writes, deletions and reads of user state
+# (config, auth, memories, sessions, skills, cron, cache) stay refused.
+# Narrow on purpose: ``tools``/``bin``/``plugins``/``bootstrap``/``pm-runtime`` stay guarded. A PATH
+# entry under the home is command lookup (see the PATH clause below), so the tool store needs no
+# subtree exemption of its own.
+_INSTALL_LAYOUT_NAMES = frozenset({
+    "installs", "node", "node_modules", "uv-cache", "npm-cache",
+})
+
+
+def _within_install_layout(path: str, roots) -> bool:
+    """*path* (normalized, absolute) is inside a guarded root's runtime install layout."""
+    for root in roots:
+        if not _within(path, root):
+            continue
+        rest = path[len(root):].lstrip(os.sep)
+        if rest and _normcase(rest.split(os.sep, 1)[0]) in _INSTALL_LAYOUT_NAMES:
+            return True
+    return False
+
+
+def _is_pkgutil_probe(path: str, roots) -> bool:
+    """``pkgutil.extend_path`` stats ``<sys.path entry>/<name>.pkg`` for every namespace package
+    it imports. Plugin discovery puts a real Hermes home on sys.path, so importing e.g. ``discord``
+    probes ``<home>/discord.pkg``: import machinery, not Hermes state."""
+    return path.endswith(".pkg") and os.path.dirname(path) in roots
 
 
 def _within(path: str, prefix: str) -> bool:
@@ -104,6 +173,24 @@ class HomeIOGuard:
             # probe) reads no state; only its contents are guarded.
             if metadata and absolute in roots:
                 return
+            # The checkout's own git metadata, including a linked worktree's out-of-tree git dir:
+            # recovery reads the interrupted-pull marker at import. Nothing may be changed there.
+            if not destructive and any(
+                _within(absolute, directory) or (metadata and _contains(absolute, directory))
+                for directory in _CHECKOUT_GIT_DIRS
+            ):
+                return
+            # Install-layout markers beside the tree (manifest.json, install-stamp.json): the
+            # payload/install probes described above read them, never write them.
+            if not destructive and os.path.dirname(absolute) in _LAYOUT_DIRS \
+                    and os.path.basename(absolute) in _LAYOUT_MARKERS:
+                return
+            # The owning root's runtime install layout (borrowing launch) and the ``.pkg`` probes
+            # namespace imports make beside it: installation state, not user state.
+            if not destructive and _within_install_layout(absolute, roots):
+                return
+            if not destructive and metadata and _is_pkgutil_probe(absolute, roots):
+                return
             # ``shutil.which`` stats/accesses ``<PATH entry>/<name>``, and command resolution
             # realpath()s the entry itself (is it a Hermes-managed bin dir?), which lstats each of
             # its ancestors. A developer shell puts PM's tool store (~/.hermes/tools/...) on PATH;
@@ -133,6 +220,13 @@ class HomeIOGuard:
             for prefix in _INTERPRETER_PREFIX_STRS:
                 if _within(resolved, prefix):
                     return
+            # A fixture symlink to the managed node runtime (~/.local/bin/node, <tmp>/store/node/
+            # bin/node) resolves into the owning root's install layout — same borrowing-launch
+            # reads as above, so they are exempt lexically and by resolution.
+            if not destructive and _within_install_layout(resolved, roots):
+                return
+            if not destructive and metadata and _is_pkgutil_probe(resolved, roots):
+                return
             for root in roots:
                 if _within(resolved, root):
                     self.refuse(value)
@@ -196,12 +290,12 @@ class HomeIOGuard:
 
         for module in (builtins, io):
             wrap(module, "open", (("file", None),), destructive=open_writes)
-        for name in ("mkdir", "unlink", "remove", "rmdir", "chmod", "utime"):
-            wrap(os, name, (("path", "dir_fd"),), destructive=name != "mkdir")
+        for name in ("mkdir", "makedirs", "unlink", "remove", "rmdir", "chmod", "utime"):
+            wrap(os, name, (("path" if name == "mkdir" else "name", "dir_fd"),), destructive=True)
         for name in ("stat", "lstat", "readlink", "access"):
             wrap(os, name, (("path", "dir_fd"),), metadata=True)
-        for name in ("makedirs", "listdir", "scandir"):
-            wrap(os, name, (("name" if name == "makedirs" else "path", None),))
+        for name in ("listdir", "scandir"):
+            wrap(os, name, (("path", None),))
         for name in ("rename", "replace"):
             wrap(os, name, (("src", "src_dir_fd"), ("dst", "dst_dir_fd")), destructive=True)
         wrap(shutil, "rmtree", (("path", "dir_fd"),), destructive=True)

@@ -206,12 +206,22 @@ def test_checkout_inside_a_guarded_root_is_not_hermes_state():
     """The default install checks the repo out INSIDE the home (install.sh:
     INSTALL_DIR=$HERMES_HOME/hermes-agent): the checkout, its .venv and test
     data are exempt even when the guarded root contains them; siblings under
-    that root are still refused."""
+    that root are still refused.
+
+    The install-layout markers beside the checkout are the one exception: PM
+    probes ``<parent>/manifest.json`` to detect a sealed payload and
+    ``<parent>/install-stamp.json`` to find the store for the tree it serves.
+    Those reads ask about the installation, not user state, so they are exempt
+    too — writing them is not."""
     from tests.home_io_guard import HomeIOGuard
 
     guard = HomeIOGuard(lambda: [PROJECT_ROOT.parent])
     guard.check(PROJECT_ROOT / "tests" / "home_io_guard.py")
     guard.check(PROJECT_ROOT / ".venv" / "bin" / "python", metadata=True)
+    guard.check(PROJECT_ROOT.parent / "manifest.json", metadata=True)  # payload detection
+    guard.check(PROJECT_ROOT.parent / "install-stamp.json")  # install-stamp walk-up
+    with pytest.raises(AssertionError, match="REAL hermes home"):
+        guard.check(PROJECT_ROOT.parent / "manifest.json", destructive=True)
     with pytest.raises(AssertionError, match="REAL hermes home"):
         guard.check(PROJECT_ROOT.parent / "config.yaml")
 
@@ -229,6 +239,50 @@ def test_pm_generation_dir_around_the_running_venv_is_the_interpreter(tmp_path, 
     assert _pm_generation_dirs([venv]) == {generation.resolve()}
     # Only a generation venv: a checkout's .venv or a venv elsewhere adds nothing new.
     assert _pm_generation_dirs([tmp_path / "checkout" / ".venv", tmp_path / "other" / "venv"]) == set()
+
+
+def test_borrowing_launch_install_layout_is_readable_but_never_changed(tmp_path):
+    """A temp-HERMES_HOME launch borrows the owning root's dependency store, so its probes
+    (``installs/<key>/facts.json``, the managed node runtime, the package caches) and the
+    ``.pkg`` stat a namespace import makes beside them must not fail the run — while the same
+    root's USER state stays refused, nothing in the layout may be changed, and the tool store
+    stays guarded (a PATH entry under the home is command lookup, not a read exemption)."""
+    from tests.home_io_guard import HomeIOGuard
+
+    root = tmp_path / "home"
+    (root / "installs" / "abc123").mkdir(parents=True)
+    (root / "installs" / "abc123" / "facts.json").write_text("{}", encoding="utf-8")
+    (root / "node" / "bin").mkdir(parents=True)
+    (root / "node" / "bin" / "node").write_text("", encoding="utf-8")
+    (root / "uv-cache").mkdir()
+    (root / "config.yaml").write_text("model: real", encoding="utf-8")
+    (root / "memories").mkdir()
+    (root / "memories" / "MEMORY.md").write_text("real", encoding="utf-8")
+    linked = tmp_path / "linked-node"
+    try:
+        linked.symlink_to(root / "node" / "bin" / "node")
+    except OSError:
+        linked = None
+
+    guard = HomeIOGuard(lambda: [root])
+    guard.check(root / "installs" / "abc123" / "facts.json")  # borrow read
+    guard.check(root / "node" / "bin" / "node", metadata=True)
+    guard.check(root / "uv-cache", metadata=True)
+    guard.check(root / "discord.pkg", metadata=True)  # pkgutil.extend_path probe
+    if linked is not None:
+        guard.check(linked)  # fixture symlink resolving into the managed runtime
+    for refused in (
+        lambda: guard.check(root / "installs" / "abc123" / "facts.json", destructive=True),
+        lambda: guard.check(root / "node" / "bin" / "node", destructive=True),
+        lambda: guard.check(root / "discord.pkg", destructive=True),
+        lambda: guard.check(root / "discord.pkg"),  # a real read of the marker is not a probe
+        lambda: guard.check(root / "tools" / "uv" / "uv"),  # tool store: PATH lookup only
+        lambda: guard.check(root / "config.yaml"),
+        lambda: guard.check(root / "memories" / "MEMORY.md"),
+        lambda: guard.check(root / "memories", metadata=True),
+    ):
+        with pytest.raises(AssertionError, match="REAL hermes home"):
+            refused()
 
 
 def test_hermes_exported_scratch_tmp_is_not_the_test_temp_root(tmp_path):
@@ -260,3 +314,48 @@ def test_hermes_exported_scratch_tmp_is_not_the_test_temp_root(tmp_path):
     )
     assert result.returncode == 0, result.stdout + result.stderr
     assert "1 passed" in result.stdout
+
+
+def test_linked_worktree_git_dir_is_checkout_metadata(tmp_path):
+    """A linked worktree's ``.git`` FILE names a git dir outside the checkout; recovery reads the
+    interrupted-pull marker there at import, so that dir is checkout metadata like an in-root
+    ``.git``. An ordinary clone's ``.git`` directory adds nothing."""
+    from tests import home_io_guard
+
+    main_repo = tmp_path / ".hermes" / "hermes-agent"
+    git_dir = main_repo / ".git" / "worktrees" / "wt"
+    git_dir.mkdir(parents=True)
+    worktree = tmp_path / ".hermes" / "worktrees" / "wt"
+    worktree.mkdir(parents=True)
+    (worktree / ".git").write_text(f"gitdir: {git_dir}\n", encoding="utf-8")
+
+    assert home_io_guard._checkout_git_dir(worktree) == {git_dir.resolve()}
+    assert home_io_guard._checkout_git_dir(main_repo) == set()
+    assert home_io_guard._checkout_git_dir(tmp_path / "absent") == set()
+
+
+def test_worktree_git_dir_reads_are_allowed_but_changes_are_not(tmp_path, monkeypatch):
+    """The resolved worktree git dir sits inside the guarded home yet holds only the checkout's
+    metadata: its interrupted-pull marker is readable, never writable, and user state beside it
+    stays refused."""
+    from tests import home_io_guard
+
+    home = tmp_path / "home"
+    git_dir = home / "hermes-agent" / ".git" / "worktrees" / "wt"
+    git_dir.mkdir(parents=True)
+    marker = git_dir / "hermes-update-pull"
+    marker.write_text("", encoding="utf-8")
+    (home / "config.yaml").write_text("model: real", encoding="utf-8")
+    monkeypatch.setattr(
+        home_io_guard, "_CHECKOUT_GIT_DIRS",
+        frozenset({os.path.normcase(os.fspath(git_dir))}),
+    )
+
+    guard = home_io_guard.HomeIOGuard(lambda: [home])
+    guard.check(marker)  # interrupted_pull_marker() at import
+    for refused in (
+        lambda: guard.check(marker, destructive=True),
+        lambda: guard.check(home / "config.yaml"),
+    ):
+        with pytest.raises(AssertionError, match="REAL hermes home"):
+            refused()
