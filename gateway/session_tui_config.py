@@ -74,7 +74,8 @@ def _sections(display):
 
 
 def _set_display(cfg, key, value):
-    """One display preference on the raw config, main's semantics; returns the result extras."""
+    """One display preference on the raw config, main's semantics; returns the result extras and the
+    dotted leaves it sets or clears (the managed-scope check's input)."""
     display, raw = _display(cfg), _word(value)
     if key in (toggles := _toggles()):
         field, aliases, flipped, report = toggles[key]
@@ -82,19 +83,19 @@ def _set_display(cfg, key, value):
         if new is None:
             raise RuntimeStoreError('invalid_params')
         display[field] = new
-        return {'value': report(new)}
+        return {'value': report(new)}, (f'display.{field}',)
     if key in (words := _words()):
         field, allowed = words[key]
         if raw not in allowed:
             raise RuntimeStoreError('invalid_params')
         display[field] = raw
-        return {'value': raw}
+        return {'value': raw}, (f'display.{field}',)
     if key == 'details_mode':
         if raw not in _DETAIL_MODES:
             raise RuntimeStoreError('invalid_params')
         display['details_mode'] = raw
         _sections(display).update(dict.fromkeys(_DETAIL_SECTIONS, raw))
-        return {'value': raw}
+        return {'value': raw}, ('display.details_mode', *(f'display.sections.{s}' for s in _DETAIL_SECTIONS))
     if key.startswith('details_mode.'):
         section = key.split('.', 1)[1]
         if section not in _DETAIL_SECTIONS or (raw and raw not in _DETAIL_MODES):
@@ -103,14 +104,14 @@ def _set_display(cfg, key, value):
             _sections(display)[section] = raw
         else:  # empty clears the override (the client falls back to its section default)
             _sections(display).pop(section, None)
-        return {'value': raw}
+        return {'value': raw}, (f'display.sections.{section}',)
     if key == 'focus':
         return _set_focus(display, raw)
     if key == 'skin':
         if not isinstance(value, str) or not value.strip():
             raise RuntimeStoreError('invalid_params')
         display['skin'] = value.strip()
-        return {'value': value.strip()}
+        return {'value': value.strip()}, ('display.skin',)
     raise RuntimeStoreError('invalid_params')
 
 
@@ -123,20 +124,30 @@ def _set_focus(display, raw):
     if action == 'usage':
         raise RuntimeStoreError('invalid_params')
     if action == 'status' or target is None:
-        return {'value': 'on' if current else 'off', 'tool_progress': configured}
+        return {'value': 'on' if current else 'off', 'tool_progress': configured}, ()
+    written = ('display.tool_progress', 'display.focus_view')
     if target:
+        written += ('display.focus_saved_tool_progress',)
         display['focus_saved_tool_progress'] = normalize_tool_progress_mode(
             (current and display.get('focus_saved_tool_progress')) or configured)
         effective = FOCUS_TOOL_PROGRESS_MODE
     else:
         effective = normalize_tool_progress_mode(display.get('focus_saved_tool_progress') or 'all')
     display['tool_progress'], display['focus_view'] = effective, bool(target)
-    return {'value': 'on' if target else 'off', 'tool_progress': effective}
+    return {'value': 'on' if target else 'off', 'tool_progress': effective}, written
+
+
+def _managed_refusal(key):
+    """A leaf the administrator's managed scope pins: refused, never written (``hermes config set``
+    refuses it too, and the next load would reinstate the managed value anyway)."""
+    return RuntimeStoreError('permission_denied', field=key, detail='managed by your administrator')
 
 
 def _write_profile_config(connection, edit):
-    """``edit(raw_cfg)`` on the owning profile's config.yaml EXACTLY as written (no defaults or
-    overlay persisted); saved only when it changed. Runs off the loop."""
+    """``edit(raw_cfg) -> (result, written leaves)`` on the owning profile's config.yaml EXACTLY as
+    written (no defaults or overlay persisted), run once; saved only when it changed. A written leaf the
+    managed scope pins refuses the whole edit unsaved, even one set to the value the raw file already
+    holds (the managed value still wins). Runs off the loop."""
     from gateway.run import _profile_runtime_scope
     from hermes_cli.config import atomic_config_replace, get_config_path, read_user_config_raw
     with _profile_runtime_scope(Path(connection.authority.profile_id)), _WRITE_LOCK:
@@ -146,7 +157,10 @@ def _write_profile_config(connection, edit):
         except Exception as exc:  # unparseable: never overwrite the user's file
             raise RuntimeStoreError('storage_unavailable') from exc
         before = copy.deepcopy(cfg)
-        result = edit(cfg)
+        result, written = edit(cfg)
+        from hermes_cli.managed_scope import managed_config_keys
+        if pinned := sorted(managed_config_keys().intersection(written)):
+            raise _managed_refusal(pinned[0])
         if cfg != before:
             try:
                 atomic_config_replace(path, cfg)
@@ -290,8 +304,11 @@ def _set_personality(connection, value):
     resolves its ephemeral prompt from that config, and the changed prompt rebuilds the cached agent."""
     from gateway.run import _profile_runtime_scope
     from hermes_cli.config import load_config
+    from hermes_cli.managed_scope import is_key_managed
     from hermes_cli.personality import persist_personality, resolve_personality
     with _profile_runtime_scope(Path(connection.authority.profile_id)), _WRITE_LOCK:
+        if is_key_managed('display.personality'):  # persist_personality writes it without this check
+            raise _managed_refusal('display.personality')
         try:
             name, _prompt = resolve_personality(str(value or ''), load_config())
         except ValueError as exc:
@@ -314,7 +331,7 @@ def _set_profile_leaf(cfg, key, value):
     if not isinstance(cfg.get(section), dict):
         cfg[section] = {}
     cfg[section][leaf] = new
-    return {'value': new}
+    return {'value': new}, (key,)
 
 
 def _set_approval_mode(connection, value):
