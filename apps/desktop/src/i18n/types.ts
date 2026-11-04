@@ -3705,6 +3705,7 @@ export interface Translations extends NoticeTranslations {
     missingTarget: string
     missingTitle: string
     missingBody: (label: string) => string
+    imageFailed: string
     opening: string
     hide: string
     openPreview: string
