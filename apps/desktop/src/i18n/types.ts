@@ -2908,8 +2908,12 @@ export interface Translations extends NoticeTranslations {
       thisMonth: string
     }
     statusDivider: {
+      attention: string
       working: string
-      done: string
+      idle: string
+      idleRecent: string
+      idleDays: string
+      idleWeek: string
     }
     markAllRead: string
   }
