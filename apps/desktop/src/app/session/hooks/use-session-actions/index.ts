@@ -192,6 +192,7 @@ import {
 } from './resume-reconcile'
 import { backgroundRuntimeOptions, runtimeOwner, runtimeOwnerProfile } from './runtime-owner'
 import { createGatewaySession, desktopSessionCreateParams } from './session-create-request'
+import { publishWarmSessionRuntime } from './session-usage'
 import {
   createPersistedDisplayTranscriptProvenance,
   hasPersistedDisplayTranscriptProvenance,
@@ -806,7 +807,7 @@ export function useSessionActions({
       const startingRouteToken = getRouteToken()
       const startingSelectedStoredId = selectedStoredSessionIdRef.current
       const params = await desktopSessionCreateParams(resolveNewSessionCwd())
-      const created = await requestGateway<SessionCreateResponse>('session.create', params)
+      const created = await createGatewaySession(null, params, requestGateway)
       const stored = created.stored_session_id
 
       if (!stored) {
@@ -1467,8 +1468,7 @@ export function useSessionActions({
           // `applyRuntimeInfo` runs, which would leave the workspace marked
           // un-owned for the life of the session (#71254).
           setWorkspaceCwdOwner(storedSessionId)
-          setCurrentBranch(cachedViewState.branch)
-          setSessionStartedAt(cachedViewState.runtimeStartedAt)
+          publishWarmSessionRuntime(cachedViewState, stored)
 
           try {
             const replay = pendingSessionReplay(cachedRuntimeId)
@@ -1952,7 +1952,7 @@ export function useSessionActions({
       const stored =
         $sessions.get().find(session => sessionMatchesStoredId(session, storedSessionId)) ?? storedForProfile
 
-      applyStoredSessionPreviewRuntimeInfo(stored, storedSessionId)
+      applyStoredSessionPreviewRuntimeInfo(stored, storedSessionId, { sameSession: resumedSameSelectedSession })
 
       if (stored) {
         applyStoredUsage(stored)
