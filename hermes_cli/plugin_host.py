@@ -242,7 +242,13 @@ class PluginHost:
         try:
             result = channel.call("load", params)
         except BaseException:
-            self._contexts.pop(plugin_key, None)
+            # register() may have queued host-side on_unload callbacks before raising: run them, as
+            # the in-process failure path does, so the failed load leaves nothing behind in the host.
+            # Best effort: a failing cleanup must not replace the load error being re-raised.
+            try:
+                self._unload(plugin_key)
+            except Exception:
+                logger.warning("Plugin '%s' cleanup after a failed load failed", plugin_key, exc_info=True)
             raise
         finally:
             self._loading = None
