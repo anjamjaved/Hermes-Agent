@@ -2795,7 +2795,7 @@ export function dropTilesForProfile(
   // The rail is a profile-keyed family too: a deleted profile's tabs must not
   // outlive it, or a later profile of the same name inherits them.
   dropPreviewTabsForProfile(name)
-  dropBrowserProfilePrefs(name)
+  dropBrowserProfilePrefs(name, route?.connectionId?.trim() || undefined)
 }
 
 /**
