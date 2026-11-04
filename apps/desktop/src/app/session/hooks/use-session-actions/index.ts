@@ -168,9 +168,11 @@ import {
 } from './restore-pending-clarify'
 import { projectPendingConnection, restorePendingConnectionFromSnapshot } from './restore-pending-connection'
 import {
+  activatedTurnAdmission,
   type GraftedTranscriptPage,
   graftTranscriptPage,
   prefetchServesResume,
+  recoveredTurnFields,
   rereadPageAfterResumeBarrier
 } from './resume-barrier-reread'
 import { clearResumeLatches, clearResumeToasts, notifyResumeFailed, type ResumeAttemptOptions } from './resume-latches'
@@ -1636,6 +1638,7 @@ export function useSessionActions({
                   // without ever having received its prompt, so the settle
                   // path must not take the "I saw it all" shortcut.
                   adoptedRunningTurn: state.adoptedRunningTurn || running,
+                  turnAdmissionId: activatedTurnAdmission(state, activateBaselineState, activated.pending),
                   turnStartedAt: running ? (activatedTurnStartedAt ?? state.turnStartedAt ?? Date.now()) : null,
                   ...(earlyClarifyProjection
                     ? {
@@ -2074,8 +2077,8 @@ export function useSessionActions({
 
         const reread = await rereadPageAfterResumeBarrier(resumed, prefetchedPage, storedSessionId, sessionRestScope)
 
-        if (reread) {
-          ;({ page: prefetchedResult, snapshot: localSnapshot, transcript: prefetchedTranscriptMessages } = reread)
+        if (reread.page) {
+          ;({ page: prefetchedResult, snapshot: localSnapshot, transcript: prefetchedTranscriptMessages } = reread.page)
         }
 
         if (!isCurrentResume()) {
@@ -2177,14 +2180,13 @@ export function useSessionActions({
           )
         }
 
-        // Crash-survivable turn progress: fold a journaled in-flight tail
-        // (persisted by use-session-state-cache while the turn streamed;
-        // survives renderer/app death) back onto the restored transcript. The
-        // backend's own inflight projection is already inside
-        // `preferredWithRuntimeChanges`, so this merge only adds the locally
-        // recorded structure that the backend's text-only snapshot cannot carry.
+        // Crash-survivable turn progress: fold a journaled in-flight tail (persisted while the turn streamed;
+        // survives renderer/app death) back onto the restored transcript. The backend's own inflight projection
+        // is already inside `preferredWithRuntimeChanges`, so this merge only adds the structure its text-only
+        // snapshot cannot carry, and nothing once the owner's pending list shows the journaled turn finished.
         const inFlightRecovery = recoverInFlightTurnJournal(storedSessionId, preferredWithRuntimeChanges, {
-          keepPending: resumedRunning
+          keepPending: resumedRunning,
+          owner: reread.owner
         })
 
         recoveredInFlightTail = inFlightRecovery.applied
@@ -2319,15 +2321,7 @@ export function useSessionActions({
               Boolean(pendingConnection) ||
               (clarifyAuthoritativelyAbsent ? false : state.needsInput),
             adoptedRunningTurn: state.adoptedRunningTurn || resumedRunning,
-            ...(inFlightRecovery.applied
-              ? {
-                  sawAssistantPayload: true,
-                  // Point live deltas at the recovered row when the backend is
-                  // still mid-turn; a settled recovery keeps the stream idle.
-                  streamId: resumedRunning ? inFlightRecovery.streamId : null,
-                  turnStartedAt: resumedRunning ? (inFlightRecovery.turnStartedAt ?? resumedTurnStartedAt) : null
-                }
-              : { turnStartedAt: resumedRunning && resumedTurnStartedAt !== null ? resumedTurnStartedAt : null }),
+            ...recoveredTurnFields(inFlightRecovery, resumedRunning, resumedTurnStartedAt),
             ...livePromptStreamId(pendingConnectionProjection, pendingClarifyProjection),
             ...(clearedClarifyProjection
               ? {
