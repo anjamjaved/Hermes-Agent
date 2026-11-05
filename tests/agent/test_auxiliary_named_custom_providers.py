@@ -633,3 +633,74 @@ class TestAuxInheritsCustomProviderExtraBody:
         # A custom endpoint no entry describes gets nothing.
         stray = _build_call_kwargs("custom", "some-model", msgs, base_url="https://stray.example/v1")
         assert "user" not in (stray.get("extra_body") or {})
+
+
+class TestNamedCustomKeyEnvDotenvFallback:
+    """#86446: a ``key_env`` whose value lives only in the profile ``.env`` must resolve.
+
+    Aux resolves a named custom provider's credential through ``_scoped_key_env`` →
+    ``get_secret``. Under an empty or foreign profile scope ``serves_routed_profile()``
+    is true, so the scope deliberately refuses the ``os.environ`` fallback and returns
+    the default ``""`` — a key that the profile ``.env`` defines reads as absent, and aux
+    then sends ``no-key-required`` as the API key (401 on auth-required endpoints).
+    """
+
+    @staticmethod
+    def _entry() -> dict:
+        return {
+            "name": "newapi",
+            "base_url": "https://newapi.example/v1",
+            "key_env": "NEW_API_KEY",
+        }
+
+    @staticmethod
+    def _scope(tmp_path, monkeypatch, *, secrets: dict | None = None):
+        """Bind an empty (or given) secret scope under multiplex semantics, as aux sees at startup."""
+        from agent import secret_scope
+
+        monkeypatch.delenv("NEW_API_KEY", raising=False)
+        home = tmp_path / ".hermes"
+        scope_token = secret_scope.set_secret_scope(secrets or {}, profile_home=str(home))
+        multiplex_token = secret_scope.set_multiplex_context(True)
+        return secret_scope, scope_token, multiplex_token
+
+    @staticmethod
+    def _release(state) -> None:
+        secret_scope, scope_token, multiplex_token = state
+        secret_scope.reset_multiplex_context(multiplex_token)
+        secret_scope.reset_secret_scope(scope_token)
+
+    def test_key_env_resolves_from_profile_dotenv_under_empty_scope(self, tmp_path, monkeypatch):
+        (tmp_path / ".hermes" / ".env").write_text("NEW_API_KEY=sk-from-dotenv\n")
+        state = self._scope(tmp_path, monkeypatch)
+        try:
+            from agent.auxiliary_client import _named_custom_api_key
+
+            entry = self._entry()
+            assert _named_custom_api_key(entry, "newapi", entry["base_url"]) == "sk-from-dotenv"
+        finally:
+            self._release(state)
+
+    def test_bound_scope_still_wins_over_the_dotenv(self, tmp_path, monkeypatch):
+        """The fallback must not overrule a scope that does carry the key."""
+        (tmp_path / ".hermes" / ".env").write_text("NEW_API_KEY=sk-from-dotenv\n")
+        state = self._scope(tmp_path, monkeypatch, secrets={"NEW_API_KEY": "sk-from-scope"})
+        try:
+            from agent.auxiliary_client import _named_custom_api_key
+
+            entry = self._entry()
+            assert _named_custom_api_key(entry, "newapi", entry["base_url"]) == "sk-from-scope"
+        finally:
+            self._release(state)
+
+    def test_absent_key_env_still_falls_back_to_the_placeholder(self, tmp_path, monkeypatch):
+        """No key anywhere keeps the existing placeholder behaviour (never invent a credential)."""
+        (tmp_path / ".hermes" / ".env").write_text("OTHER_KEY=sk-unrelated\n")
+        state = self._scope(tmp_path, monkeypatch)
+        try:
+            from agent.auxiliary_client import _named_custom_api_key
+
+            entry = self._entry()
+            assert _named_custom_api_key(entry, "newapi", entry["base_url"]) == "no-key-required"
+        finally:
+            self._release(state)
