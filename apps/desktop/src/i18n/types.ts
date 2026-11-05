@@ -2925,6 +2925,7 @@ export interface Translations extends NoticeTranslations {
     startVoice: string
     openDirective: string
     queueMessage: string
+    compactingNotice: string
     steer: string
     redirect: string
     stop: string
@@ -3897,6 +3898,7 @@ export interface Translations extends NoticeTranslations {
       loadingSession: string
       showEarlier: string
       loadingResponse: string
+      compacting: string
       loadingLocalModel: (model: string) => string
       processingPrompt: string
       resumeWhenBackgroundDone: (count: number) => string
