@@ -297,8 +297,8 @@ async def execute(authority, ref, row, policy):
     token = bind_execution(authority, ref.session_id, job['id'], execution_id)
     try:
         db_path = await asyncio.to_thread(Path(authority.db.db_path).resolve)
-        from agent.runtime_scope import bind_turn
-        with _profile_runtime_scope(db_path.parent), bind_turn(ref.session_id, row['admission_id']):
+        from agent.runtime_scope import bind_turn, claim_fence
+        with _profile_runtime_scope(db_path.parent), bind_turn(ref.session_id, row['admission_id'], claim_fence(row)):
             result = await asyncio.to_thread(_run_identified, run_job, job, execution_id,
                                              extra_prompt=data['extra_prompt'], cancel_event=cancel)
         # run_job stamps run-side verdicts on ITS job copy (quota hold, unreachable model); the
