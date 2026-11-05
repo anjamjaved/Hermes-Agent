@@ -3693,7 +3693,8 @@ export const ruOverrides = {
         ran: 'Выполнено',
         running: 'Выполняется',
         ranCode: 'Код выполнен',
-        runningCode: 'Скриптинг'
+        runningCode: 'Скриптинг',
+        blocked: 'Заблокировано'
       },
       prefixes: {
         browser: 'Браузер',

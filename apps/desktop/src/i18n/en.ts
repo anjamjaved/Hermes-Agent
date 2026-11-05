@@ -4633,7 +4633,8 @@ export const en: Translations = {
         ran: 'Ran',
         running: 'Running',
         ranCode: 'Ran code',
-        runningCode: 'Scripting'
+        runningCode: 'Scripting',
+        blocked: 'Blocked'
       },
       prefixes: {
         browser: 'Browser',

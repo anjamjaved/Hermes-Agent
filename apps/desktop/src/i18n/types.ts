@@ -4114,6 +4114,7 @@ export interface Translations extends NoticeTranslations {
         running: string
         ranCode: string
         runningCode: string
+        blocked: string
       }
       prefixes: {
         browser: string

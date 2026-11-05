@@ -3505,7 +3505,8 @@ export const jaOverrides = {
         ran: '実行完了',
         running: '実行中',
         ranCode: 'コード実行完了',
-        runningCode: 'スクリプト作成中'
+        runningCode: 'スクリプト作成中',
+        blocked: 'ブロック済み'
       },
       prefixes: {
         browser: 'ブラウザー',
