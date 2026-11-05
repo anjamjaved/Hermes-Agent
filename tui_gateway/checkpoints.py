@@ -43,6 +43,24 @@ def resolve_checkpoints_enabled(cfg: dict | None = None) -> bool:
     return _load_checkpoints_enabled(cfg)
 
 
+def revert_undone_files(session: dict, live_view: dict) -> list[str]:
+    """``/undo``'s file half on the TUI sidecar: put back the files the undone turns wrote (keyed by
+    the rewound user row's stored timestamp), via the session agent's checkpoint manager. Lines
+    naming what was reverted/kept; empty with checkpoints off or no file writes."""
+    from tools.checkpoint_turns import summarize, undo_turn_files
+    from tui_gateway.server import _session_cwd, _session_db, _session_profile_runtime_scope
+    agent = session.get("agent")
+    mgr = getattr(agent, "_checkpoint_mgr", None)
+    try:
+        # The session's profile, not the launch one: the checkpoint store lives under its home.
+        with _session_profile_runtime_scope(session, hydrate_secrets=False), _session_db(session) as db:
+            result = undo_turn_files(mgr, live_view.get("timestamp"), db,
+                                     getattr(agent, "session_id", None), session.get("session_key"))
+    except Exception as exc:  # health: allow BLE001 -- the transcript undo already committed; report it
+        result = {"errors": [str(exc)]}
+    return summarize(result, _session_cwd(session))
+
+
 def _resolve_checkpoint_hash(mgr, cwd: str, ref: str) -> str:
     """``/rollback N`` style number → the checkpoint's hash; a real hash passes through."""
     try:

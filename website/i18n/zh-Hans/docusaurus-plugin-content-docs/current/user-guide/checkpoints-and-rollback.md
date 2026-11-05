@@ -15,12 +15,34 @@ Hermes Agent 可以在**破坏性操作**之前自动为你的项目创建快照
 hermes chat --checkpoints
 ```
 
-或在 `~/.hermes/config.yaml` 中全局启用：
+或在 `~/.hermes/config.yaml` 中全局启用（或执行 `hermes config set checkpoints.enabled true`）：
 
 ```yaml
 checkpoints:
   enabled: true
 ```
+
+### `/undo` 同时还原该轮的文件
+
+开启检查点后，`/undo [N]` 会回退最近 N 个用户轮次，**并且**把 Hermes 在这些轮次中写入的每个文件恢复到其中第一轮之前的状态（TUI、经典 CLI、Desktop 后端和消息平台均如此），并报告结果：
+
+```
+↶ Undid 1 turn (2 message(s)). Edit and resubmit, or send a new message.
+↶ Reverted 2 file(s) the undone turn wrote: app.py, notes.md
+```
+
+- 被撤销轮次中 Hermes **新建**的文件会被删除；**修改过**的文件恢复为之前的内容。
+- Hermes 写入之后你又手动修改过的文件会被**保留**；仍可用 `/rollback` 恢复。
+- 不会触碰其他对话写入的文件；没有写文件的轮次不会改动任何文件。
+- 撤销前会先保存一个快照，所以 `/rollback` 可以“撤销这次撤销”。
+- `/retry` 不会改动文件。关闭检查点时，`/undo` 与以前一样只回退对话。
+- `/undo` 回退的是 Hermes 文件工具（`write_file`、`patch`）写入的内容。只被终端命令（`sed -i`、`>`）改动的文件不按轮次跟踪；这类改动请用 `/rollback` 从命令执行前的检查点恢复。
+
+### 永远不会被快照的内容
+
+`/`、你的主目录及其所有上级目录；条目超过 50,000 的目录树（不计下列排除目录）；排除目录（`node_modules/`、`.venv/`、`.git/`、`dist/`、`build/`、缓存、Hermes 浏览器配置目录）；超过 `max_file_size_mb` 的文件；以及位于项目内部的检查点存储本身。
+
+实测：一个 2.35 万文件的仓库首次快照约 5 秒、约 165 MB 存储，之后无变化的轮次不到 1 秒；以 `$HOME` 为工作目录时直接跳过（0 字节）。
 
 此安全机制由内部**检查点管理器（Checkpoint Manager）**驱动，它在 `~/.hermes/checkpoints/store/` 下维护一个共享的影子 git 仓库——你真实项目的 `.git` 永远不会被触碰。Agent 操作的所有项目共享同一个存储，因此 git 的内容寻址对象数据库可以跨项目、跨轮次去重。
 

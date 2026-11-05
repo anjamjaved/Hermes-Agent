@@ -31,9 +31,17 @@ const isUserTurn = (row: Record<string, unknown>) =>
 
 /** The rewind payload for the newest user turn in the snapshot the CAS tuple came from. */
 export function lastTurnRewind(snapshot: MutationSnapshot): null | { target_message_id: number } {
-  const target = (snapshot.stored_messages ?? snapshot.messages ?? []).findLast(isUserTurn)
+  return turnsBackRewind(1)(snapshot)
+}
 
-  return target ? { target_message_id: target.row_id as number } : null
+/** `/undo N`: the Nth-newest user turn (clamped to the oldest, as main's `/undo N` clamps). */
+export function turnsBackRewind(turns: number) {
+  return (snapshot: MutationSnapshot): null | { target_message_id: number } => {
+    const userTurns = (snapshot.stored_messages ?? snapshot.messages ?? []).filter(isUserTurn)
+    const target = userTurns[Math.max(userTurns.length - turns, 0)]
+
+    return target ? { target_message_id: target.row_id as number } : null
+  }
 }
 
 const TEXT_PARTS = new Set(['input_text', 'output_text', 'text'])
@@ -147,10 +155,11 @@ export function canonicalReasoning(payload: { scope?: string; value: string }, c
 }
 
 /** `/undo` and `/retry`: rewind to before the newest user turn; `/retry` then resubmits its text. */
-export function canonicalRewind(intent: 'retry' | 'undo', ctx: SlashRunCtx) {
+export function canonicalRewind(intent: 'retry' | 'undo', ctx: SlashRunCtx, turns = 1) {
   const sid = ctx.sid!
+  const payload = intent === 'retry' ? retryTurnRewind : turns > 1 ? turnsBackRewind(turns) : lastTurnRewind
 
-  void mutateCanonical(ctx.gateway.gw, sid, 'rewind', intent === 'retry' ? retryTurnRewind : lastTurnRewind, ctx.stale)
+  void mutateCanonical(ctx.gateway.gw, sid, 'rewind', payload, ctx.stale)
     .then(mutation => {
       if (!mutation || ctx.stale()) {
         return
@@ -163,12 +172,16 @@ export function canonicalRewind(intent: 'retry' | 'undo', ctx: SlashRunCtx) {
         return ctx.transcript.sys(t(intent === 'retry' ? 'slashCmd.core.retry.nothing' : 'slashCmd.core.undo.nothing'))
       }
 
-      ctx.transcript.setHistoryItems(prev => ctx.transcript.trimLastExchange(prev))
+      ctx.transcript.setHistoryItems(prev =>
+        trimExchanges(prev, intent === 'retry' ? 1 : turns, ctx.transcript.trimLastExchange)
+      )
 
       if (intent === 'undo') {
-        return ctx.transcript.sys(
+        ctx.transcript.sys(
           t(removed === 1 ? 'slashCmd.core.undo.undidOne' : 'slashCmd.core.undo.undidOther', String(removed))
         )
+
+        return revertUndoneFiles(ctx, sid, (result.target_message as undefined | { id?: unknown })?.id)
       }
 
       // Main's /retry: the rewound user turn's own text, not whatever this view typed last.
@@ -187,6 +200,41 @@ export function canonicalRewind(intent: 'retry' | 'undo', ctx: SlashRunCtx) {
         ctx.transcript.sys(busy)
       }
     })
+}
+
+/** Drop up to `turns` trailing exchanges; stops once a trim removes nothing, so an `/undo N` far
+ * past the transcript's length costs one pass per exchange actually shown, never N. */
+export function trimExchanges<T>(items: T[], turns: number, trim: (items: T[]) => T[]): T[] {
+  let current = items
+
+  for (let i = 0; i < turns; i++) {
+    const next = trim(current)
+
+    if (next.length === current.length) {
+      break
+    }
+
+    current = next
+  }
+
+  return current
+}
+
+/** `/undo`'s file half: the owner puts back the files the undone turns wrote (hand edits kept) and
+ * names them; nothing is shown when checkpoints are off or the turns wrote nothing. */
+function revertUndoneFiles(ctx: SlashRunCtx, sid: string, targetId: unknown) {
+  if (!Number.isSafeInteger(targetId)) {
+    return
+  }
+
+  void ctx.gateway.gw
+    .request<{ lines?: string[] }>('rollback.undo_files', { session_id: sid, target_message_id: targetId })
+    .then(result => {
+      if (!ctx.stale()) {
+        ;(result?.lines ?? []).forEach(line => ctx.transcript.sys(line))
+      }
+    })
+    .catch(ctx.guardedErr)
 }
 
 /** Main's busy text for a refused rewind: wait for a running /compress, else stop the reply; null otherwise. */

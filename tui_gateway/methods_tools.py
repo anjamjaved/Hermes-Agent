@@ -880,6 +880,7 @@ def _cmd_undo(rid, params, session, name, arg):
     _tui_model_friction("undo", session, turns_undone)
     turn_word = "turn" if turns_undone == 1 else "turns"
     notice = f"↶ Undid {turns_undone} {turn_word} ({rewound_count} message(s)). Edit and resubmit, or send a new message."
+    notice = "\n".join([notice, *_revert_undone_files(session, live_view)])
     return _ok(rid, {"type": "prefill", "message": target_text, "notice": notice})
 
 

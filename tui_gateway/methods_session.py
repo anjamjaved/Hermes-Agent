@@ -2012,12 +2012,12 @@ def _(rid, params: dict, session: dict) -> dict:
         from agent.context_compressor import user_originated_turn_view
         if user_turns := sum(1 for message in history if user_originated_turn_view(message) is not None):
             try:
-                removed = _rewind_active_session_history(session, user_turns - 1)[2]
+                live_view, removed = _rewind_active_session_history(session, user_turns - 1)[1:]
             except Exception as exc:
                 return _err(rid, 5008, f"undo: {exc}")
     if removed:  # Ink /retry is undo + resend and says so via ``intent`` (helper: methods_tools).
         _tui_model_friction("retry" if params.get("intent") == "retry" else "undo", session)
-    return _ok(rid, {"removed": removed})
+    return _ok(rid, {"removed": removed, "files": _revert_undone_files(session, live_view) if removed and params.get("intent") != "retry" else []})  # /retry keeps files
 
 
 def _save_via_compute_host(rid, params: dict) -> dict:

@@ -890,13 +890,14 @@ export const coreCommands: SlashCommand[] = [
   {
     help: 'undo last exchange',
     name: 'undo',
-    run: (_arg, ctx) => {
+    run: (arg, ctx) => {
       if (!ctx.sid) {
         return ctx.transcript.sys(t('slashCmd.core.undo.nothing'))
       }
 
       if (ctx.gateway.gw?.isCanonical) {
-        return canonicalRewind('undo', ctx)
+        // `/undo N` backs up N user turns, as the classic CLI and messaging gateway do.
+        return canonicalRewind('undo', ctx, Math.max(Number.parseInt(arg.trim(), 10) || 1, 1))
       }
 
       ctx.gateway.rpc<SessionUndoResponse>('session.undo', { session_id: ctx.sid }).then(
@@ -906,6 +907,7 @@ export const coreCommands: SlashCommand[] = [
             ctx.transcript.sys(
               t(r.removed === 1 ? 'slashCmd.core.undo.undidOne' : 'slashCmd.core.undo.undidOther', String(r.removed))
             )
+            r.files?.forEach(line => ctx.transcript.sys(line))
           } else {
             ctx.transcript.sys(t('slashCmd.core.undo.nothing'))
           }
