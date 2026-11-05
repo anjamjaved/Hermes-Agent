@@ -7,6 +7,7 @@ import logging
 import os
 import threading
 import time
+import weakref
 from collections import Counter
 from collections.abc import Iterator, Mapping
 from dataclasses import replace
@@ -124,6 +125,7 @@ class HostedRoomService:
         self.discussion_limits = _discussion_limits(self.root)
         hosted_rooms.prune_disbanded_rooms(self.db_path)
         self._policy_lock = threading.RLock()
+        self._prepare_locks: weakref.WeakValueDictionary[str, Any] = weakref.WeakValueDictionary()
         self._pending_actions: dict[tuple[str, str], dict[str, Any]] = {}
         self.policy_checkpoint = HostedRoomPolicyCheckpoint(
             self.db_path,
@@ -479,8 +481,18 @@ class HostedRoomService:
                 "discussion_event_id": decision.discussion_event_id},
             authority_gateway_id=gateway_id, authority_epoch=epoch)
 
-    def prepare_room(self, binding: HostedRoomBinding) -> None:
+    def _room_prepare_lock(self, room_id: str):
         with self._policy_lock:
+            lock = self._prepare_locks.get(room_id)
+            if lock is None:
+                lock = threading.RLock()
+                self._prepare_locks[room_id] = lock
+            return lock
+
+    def prepare_room(self, binding: HostedRoomBinding) -> None:
+        # Serialize one room's policy without holding the status/route cache lock
+        # across SQLite work or making an unrelated room wait behind this one.
+        with self._room_prepare_lock(binding.room_id):
             room = self._room(binding.room_id)
             snapshot = self._policy_snapshot(room)  # sync() side effect feeds the publish below
             try:

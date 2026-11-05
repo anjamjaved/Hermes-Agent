@@ -245,6 +245,29 @@ ACP and finite CLI viewers detach with an explicit recovery notice if an accepte
 input becomes blocked behind an unknown execution. The accepted input remains
 queued: resolve the lost turn before continuing, rather than resending it.
 
+## Private control request workers
+
+The POSIX control listener owns separate bounded executors for hosted producer
+requests and other control requests. A `hosted-producer` operation synchronously
+calls back through `hosted-attest` and `identify`, then waits for canonical session
+work on the owner loop. Those callbacks must not queue behind producers waiting
+for them, and neither pool occupies the loop's default executor used by session
+work. Request scheduling does not replace the existing peer and envelope checks.
+
+Stopping the listener cancels queued work and retires both pools. Already-running
+handlers retain their existing RPC deadlines; a restarted listener gets fresh
+pools. The Windows named-pipe listener retains its native worker lifecycle.
+
+Hosted-room recovery handles persisted stops before policy checkpoint work. An
+uncertain canonical attempt is resolved only for a saved Stop naming the exact
+task and execution generation, and only when the member reports it inactive.
+The member's canonical queue must acknowledge cancellation before the room task
+is marked cancelled; an inactive `unknown` attempt is not itself an acknowledgement.
+This preserves history and lets the next group input proceed without replaying
+the lost turn. Room preparation is serialized per room, with transient locks
+released when unused, so a checkpoint wait does not hold the shared status/route
+cache lock or serialize preparation of unrelated rooms.
+
 ## Private native HTTP authentication
 
 The authoritative daemon accepts a **fresh, one-use HTTP grant per request** from
