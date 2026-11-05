@@ -242,6 +242,27 @@ def detect_hardline_command(command: str) -> tuple:
 
 
 # ---- Dangerous command patterns -----------------------------------------------------------
+# PowerShell accepts any unambiguous parameter prefix (``-r`` is ``-Recurse``, ``-fo`` is
+# ``-Force``), so spelling the switches out in full misses ``ri -r -fo``. On Remove-Item and
+# Remove-ItemProperty ``-f`` alone is ambiguous with ``-Filter`` and refuses to run; on
+# Stop-Process and Stop-Service ``-Force`` is the only F parameter, so ``-f`` already means it.
+_PS_RECURSE = r"-r(?:e(?:c(?:u(?:r(?:s(?:e)?)?)?)?)?)?\b"
+_PS_FORCE = r"-fo(?:r(?:c(?:e)?)?)?\b"
+_PS_FORCE_ONLY_F = r"-f(?:o(?:r(?:c(?:e)?)?)?)?\b"
+_PS_DELETE_VERB = r"(?:remove-item|rmdir|erase|del|rd|ri|rm)"
+# powershell/pwsh as the program a command runs: line start, a shell separator, or a launcher
+# (sudo -u bob, env FOO=1, timeout 5, xargs, wsl, cmd /c, ssh -p 22 <host>; option tokens may carry
+# one value; ssh and cmd /c may quote the remote command), with an optional directory prefix (`C:\\...\\powershell.exe`). The prefix excludes
+# `(){}` and backticks so a run of them is not re-scanned from every position (quadratic).
+_PS_LAUNCHER_OPTIONS = r"(?:\s+-\S+(?:\s+[^\s;&|-]\S*)?|\s+\w+=\S*)*"
+_PS_EXE_AT_COMMAND_POSITION = (
+    r"(?:^|[;&|({`\n]"
+    r"|\b(?:sudo|doas|env|exec|nohup|start|time|nice|command|xargs|wsl|busybox|timeout\s+\S+)"
+    + _PS_LAUNCHER_OPTIONS + r"\s"
+    r"|\bcmd(?:\.exe)?\s+/[ck]\s+[\"']?|\bssh(?:\s+-\S+(?:\s+[^\s;&|-]\S*)?)*\s+[^\s;&|-]\S*\s+[\"']?)"
+    r"\s*(?:[^\s;&|\"'(){}\x60]*[\\/])?(?:powershell|pwsh)(?:\.exe)?(?=\s)"
+)
+
 DANGEROUS_PATTERNS = [
     (r'\brm\s+(-[^\s]*\s+)*/', "delete in root path"),
     (r'\brm\s+-[^\s]*r', "recursive delete"),
@@ -256,12 +277,23 @@ DANGEROUS_PATTERNS = [
      # spellings the two patterns above catch — without this rule they run with no approval prompt at all.
      # Port of openai/codex#33464 ("recognize force options when they follow operands").
      "recursive delete (flags after operands)"),
+
     # Windows cmd/powershell destructive built-ins: gate only when executed through the shell so
     # prose/filenames containing "del"/"rd" do not trip.
     (r'\bcmd(?:\.exe)?\s+/(?:c|k)\s+.*\b(?:del|erase|rd|rmdir)\b', "Windows cmd destructive delete"),
     # PowerShell runs the verb as default positional arg (no -Command needed); anchor the verb to command
     # position (after leading -Flag switches and optional -Command/-c) so `-File c:\del-logs\run.ps1` is not caught.
-    (r'\b(?:powershell|pwsh)(?:\.exe)?\b(?:\s+-\S+)*\s+(?:-(?:command|c)\s+)?["\']?(?:remove-item|rmdir|erase|del|rd|ri|rm)\b', "Windows PowerShell destructive delete"),
+    (r'\b(?:powershell|pwsh)(?:\.exe)?\b(?:\s+-\S+)*\s+(?:-(?:command|c)\s+)?["\']?' + _PS_DELETE_VERB + r'\b', "Windows PowerShell destructive delete"),
+    # The same delete later in the script: `powershell -NoProfile "gci C:\\data | ri -r -fo"` (Windows
+    # PowerShell runs a positional argument as the command) puts the verb after a pipe, `;` or a
+    # `{ }` block, where the rule above walks past it. Like that rule, no switch is required:
+    # `gci -Recurse -File | ri` deletes every file with none. The executable must be at command
+    # position (or behind sudo/cmd /c/ssh <host>) and the quote must open its first non-flag argument,
+    # so `echo powershell "gci | ri"`, `pwsh -v; jq ".a | del(.b)"` and `cd ~/powershell-scripts &&
+    # git grep "a|rd"` stay quiet, and an outer-shell `powershell -c Get-Date; rm notes.txt` is left
+    # to the rm rules. The span runs to the OUTER quote, so a nested `'C:\\work dir'` cannot end it.
+    (_PS_EXE_AT_COMMAND_POSITION + r'(?:\s+-\S+)*\s+(?:"[^"\n]*|\'[^\'\n]*)[|;{(]\s*' + _PS_DELETE_VERB + r'(?![\w-])',
+     "Windows PowerShell destructive delete (later in the script)"),
     (r'\b(?:powershell|pwsh)(?:\.exe)?\b.*\s-(?:encodedcommand|enc|e)\b', "PowerShell encoded command execution"),
     # ── Windows destructive tier: native Windows EXEs/cmdlets reachable from ANY backend on a
     # Windows host (incl. git-bash). Input is lowercased by the variant loop, so patterns are
@@ -269,7 +301,13 @@ DANGEROUS_PATTERNS = [
     # `reg query`, `icacls file`) does NOT prompt. Bare Remove-Item form (ACP clients, pwsh-default
     # SSH hosts, or compound commands where `powershell` appeared earlier).
     # See #69472.
-    (r'\bremove-item\b[^\n;|&]*\s-(?:recurse|force)\b', "PowerShell destructive delete (Remove-Item)"),
+    # PowerShell accepts any unambiguous parameter prefix: `-r`/`-rec`/`-recurs` are -Recurse,
+    # `-fo`/`-forc` are -Force (validated on Windows PowerShell 5.1, #144024).
+    (r'\bremove-item\b[^\n;|&]*\s(?:' + _PS_RECURSE + r'|' + _PS_FORCE + r')', "PowerShell destructive delete (Remove-Item)"),
+    # Remove-Item aliases after a pipe — `gci C:\data | ri -r -fo` runs the same recursive forced
+    # delete from a positional script whose first command is not itself a delete verb, whether or
+    # not a `powershell` prefix precedes it.
+    (r'\|\s*' + _PS_DELETE_VERB + r'(?![\w-])[^\n;|&]*\s(?:' + _PS_RECURSE + r'|' + _PS_FORCE + r')', "PowerShell destructive delete (alias after pipe)"),
     # Bare cmd builtins with /s (recurse) or /q (quiet); plain `del file.txt` is covered only by the prefixed rule.
     (r'\b(?:del|erase|rd|rmdir)\s+(?:/[a-z]\s+)*/[sq]\b', "Windows destructive delete (recursive/quiet switch)"),
     # Remote content piped to Invoke-Expression — PowerShell's `curl | sh`.
@@ -277,7 +315,7 @@ DANGEROUS_PATTERNS = [
     (r'\b(?:iex|invoke-expression)\s*\(\s*(?:iwr|invoke-webrequest|invoke-restmethod|irm)\b', "execute remote content via Invoke-Expression"),
     # Force process kills — Windows analogue of pkill -9.
     (r'\btaskkill\b[^\n]*\s/f\b', "force kill processes (taskkill /F)"),
-    (r'\bstop-process\b[^\n]*\s-force\b', "force kill processes (Stop-Process -Force)"),
+    (r'\bstop-process\b[^\n]*\s' + _PS_FORCE_ONLY_F, "force kill processes (Stop-Process -Force)"),
     # Volume/disk destruction — Windows analogue of mkfs / dd.
     (r'\bformat-volume\b', "format filesystem (Format-Volume)"),
     (r'\bclear-disk\b', "wipe disk (Clear-Disk)"),
@@ -289,13 +327,15 @@ DANGEROUS_PATTERNS = [
     (r'\bicacls\b[^\n]*\s/reset\b', "reset ACLs recursively (icacls /reset)"),
     # Backup/recovery destruction — classic ransomware prep.
     (r'\bvssadmin\b[^\n]*\bdelete\s+shadows\b', "delete volume shadow copies (vssadmin)"),
+    # WMIC twin of the vssadmin rule — same shadow-copy destruction, older spelling.
+    (r'\bwmic\b[^\n]*\bshadowcopy\b[^\n]*\bdelete\b', "delete volume shadow copies (wmic)"),
     (r'\bwbadmin\b[^\n]*\bdelete\b', "delete backups (wbadmin)"),
     (r'\bbcdedit\b[^\n]*\s/set\b', "modify boot configuration (bcdedit /set)"),
     # Registry deletion with force flag.
     (r'\breg(?:\.exe)?\s+delete\b', "registry delete (reg delete)"),
-    (r'\bremove-itemproperty\b[^\n]*\s-force\b', "registry value delete (Remove-ItemProperty -Force)"),
+    (r'\bremove-itemproperty\b[^\n]*\s' + _PS_FORCE, "registry value delete (Remove-ItemProperty -Force)"),
     # Windows service/system stop — analogue of systemctl stop.
-    (r'\bstop-service\b[^\n]*\s-force\b', "force stop service (Stop-Service -Force)"),
+    (r'\bstop-service\b[^\n]*\s' + _PS_FORCE_ONLY_F, "force stop service (Stop-Service -Force)"),
     (r'\bsc(?:\.exe)?\s+(?:stop|delete)\b', "stop/delete service (sc)"),
     # Windows-form credential paths; the POSIX ~/.ssh patterns never match drive-letter or backslash spellings.
     (r'\busers[\\/][^\\/\s]+[\\/]\.ssh\b', "access to SSH keys (Windows path)"),
@@ -507,6 +547,14 @@ _QUOTE_MASKED_DANGEROUS_DESCRIPTIONS = frozenset({
     "find dynamic shell word may expand to destructive flag",
     "dynamic shell word may expand to arbitrary program execution flag",
 })
+# A quoted `| ri -r` is prose (`Write-Host "run gci | ri -r"`), unless an unquoted launcher runs the
+# quoted text as a script: `ssh host "gci | ri -r"`, `cmd /c "..."`, `iex "..."`, `echo "..." | pwsh -`.
+_PS_PIPE_ALIAS_DESCRIPTION = "PowerShell destructive delete (alias after pipe)"
+_PS_QUOTED_SCRIPT_LAUNCHER_RE = re.compile(
+    r"(?<![\w.-])(?:ssh|iex|invoke-expression|invoke-command|icm|pwsh|powershell|wsl|runas|start-process"
+    r"|start-job|saps)(?:\.exe)?(?![\w-])|\bcmd(?:\.exe)?\s+/[ck]\b",
+    _RE_FLAGS,
+)
 
 # Content-level rules (ported from tirith in #133832, where they were separate findings with their own
 # keys). They describe WHAT the command carries rather than which verb runs it, so a command that also
@@ -1632,6 +1680,12 @@ def _word_may_run_curl_or_wget(word: str) -> bool:
     return not unquoted.startswith("-") and not _ENV_ASSIGNMENT_RE.fullmatch(word) and ("$" in word or "`" in word)
 
 
+def _quoted_text_is_executed(variant: str, masked_lower: str) -> bool:
+    """Whether an unquoted launcher (ssh, cmd /c, iex, a pipe into pwsh) or a shell carrier runs the
+    command's quoted text as code, so the pipe-alias rule must not treat it as prose."""
+    return bool(_PS_QUOTED_SCRIPT_LAUNCHER_RE.search(masked_lower)) or _contains_shell_carrier(variant)
+
+
 def _iter_dangerous_descriptions(command: str, only: frozenset[str] | None = None):
     """Yield the description (= pattern key) of every dangerous match, in detection order; may repeat.
     *only* restricts the scan to those pattern rules and skips the parser-limit, execution-flag and
@@ -1649,12 +1703,15 @@ def _iter_dangerous_descriptions(command: str, only: frozenset[str] | None = Non
         command_lower = _lower_preserving_flags(command_variant)
         masked_lower: str | None = None
         for pattern_re, description in patterns:
-            if description in _QUOTE_MASKED_DANGEROUS_DESCRIPTIONS:
+            if description in _QUOTE_MASKED_DANGEROUS_DESCRIPTIONS or description == _PS_PIPE_ALIAS_DESCRIPTION:
                 if masked_lower is None:
                     masked_lower = _lower_preserving_flags(
                         _mask_quoted_prose(command_variant)
                     )
-                if pattern_re.search(masked_lower):
+                if pattern_re.search(masked_lower) or (
+                    description == _PS_PIPE_ALIAS_DESCRIPTION and pattern_re.search(command_lower)
+                    and _quoted_text_is_executed(command_variant, masked_lower)
+                ):
                     yield description
             elif description == _CREDENTIAL_UPLOAD_DESCRIPTION:
                 matches = list(pattern_re.finditer(command_lower))
