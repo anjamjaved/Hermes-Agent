@@ -40,6 +40,7 @@ import { Journey } from './journey.js'
 import { LoopBar } from './loopBar.js'
 import { MessageLine } from './messageLine.js'
 import { QueuedMessages } from './queuedMessages.js'
+import { RewindFocusScroller, useRewindFocusIndex } from './rewindFocus.js'
 import { LiveTodoPanel, StreamingAssistant } from './streamingAssistant.js'
 import { type InputCursorSnapshot, TextInput, type TextInputMouseApi } from './textInput.js'
 
@@ -155,6 +156,7 @@ const TranscriptPane = memo(function TranscriptPane({
   transcript
 }: Pick<AppLayoutProps, 'actions' | 'composer' | 'progress' | 'transcript'> & { nativeMode: boolean }) {
   const ui = useStore($uiState)
+  const T = useT()
   const petBox = useStore($petBox)
   const railCols = useAmbientRailWidth('left') + useAmbientRailWidth('right')
 
@@ -191,6 +193,8 @@ const TranscriptPane = memo(function TranscriptPane({
     [transcript.historyItems]
   )
 
+  const rewindFocusIdx = useRewindFocusIndex(transcript.historyItems)
+
   const clearBlankSelection = (e: { cellIsBlank?: boolean }) => {
     if (e.cellIsBlank) {
       actions.clearSelection()
@@ -208,6 +212,8 @@ const TranscriptPane = memo(function TranscriptPane({
               <Text color={ui.theme.color.border}>───</Text>
             </Box>
           )}
+
+          {row.index === rewindFocusIdx && <Text color={ui.theme.color.accent}>{T.prompt.rewind.marker}</Text>}
 
           {row.msg.kind === 'intro' ? (
             nativeMode ? null : (
@@ -295,6 +301,14 @@ const TranscriptPane = memo(function TranscriptPane({
           messages={transcript.historyItems}
           offsets={transcript.virtualHistory.offsets}
           onChange={actions.setStickyPrompt}
+          scrollRef={transcript.scrollRef}
+        />
+      )}
+
+      {!nativeMode && (
+        <RewindFocusScroller
+          messages={transcript.historyItems}
+          offsets={transcript.virtualHistory.offsets}
           scrollRef={transcript.scrollRef}
         />
       )}
@@ -627,6 +641,7 @@ export const AppLayout = memo(function AppLayout({
               <PromptZone
                 cols={composer.cols}
                 onApprovalChoice={actions.answerApproval}
+                onApprovalTell={actions.answerApprovalTell}
                 onClarifyCancel={actions.cancelClarify}
                 onClarifyQuestionAnswer={actions.answerClarifyQuestion}
                 onSecretSubmit={actions.answerSecret}
