@@ -770,12 +770,22 @@ CONFIG_SCHEMA = ProviderConfigSchema(
         assert "secret-value" not in json.dumps(data)
 
 
-    # ── Memory provider config (host-block backend) ─────────────────────
-    # ``honcho_host_block`` storage is a host contract a catalog provider opts into. The core
-    # router reaches four names in the provider's own modules; this fixture is that contract.
+    # ── Memory provider config (provider-owned storage) ─────────────────
+    # ``storage=STORAGE_PROVIDER``: the provider's read_config_fields / write_config_fields own the
+    # file layout (here a host-block file like a catalog provider keeps); core never opens it.
 
     _HOSTPROV_INIT = """
+import json
+from pathlib import Path
+
 from agent.memory_provider import MemoryProvider
+
+_ROOT_KEYS = {"baseUrl"}
+
+
+def _read(home):
+    path = Path(home) / "hostprov.json"
+    return path, (json.loads(path.read_text(encoding="utf-8")) if path.exists() else {})
 
 
 class HostProv(MemoryProvider):
@@ -790,52 +800,37 @@ class HostProv(MemoryProvider):
     def get_tool_schemas(self):
         return []
 
+    def read_config_fields(self, hermes_home):
+        _path, cfg = _read(hermes_home)
+        block = (cfg.get("hosts") or {}).get("hermes") or {}
+        values = {**{k: v for k, v in cfg.items() if k in _ROOT_KEYS}, **block}
+        return {"values": values, "placeholders": {"workspace": "hermes", "aiPeer": "hermes"}}
+
+    def write_config_fields(self, values, hermes_home):
+        path, cfg = _read(hermes_home)  # a file that does not parse raises ValueError: no write
+        block = cfg.setdefault("hosts", {}).setdefault("hermes", {})
+        for key, value in values.items():
+            target = cfg if key in _ROOT_KEYS else block
+            if value is None:
+                target.pop(key, None)
+            else:
+                target[key] = value
+        path.write_text(json.dumps(cfg), encoding="utf-8")
+
 
 def register(ctx):
     ctx.register_memory_provider(HostProv())
 """
-    _HOSTPROV_CLIENT = """
-from hermes_constants import get_hermes_home
-
-
-def resolve_active_host():
-    return "hermes"
-
-
-def resolve_config_path():
-    return get_hermes_home() / "hostprov.json"
-
-
-def _host_block(cfg, host):
-    return (cfg.get("hosts") or {}).get(host) or {}
-"""
-    _HOSTPROV_OAUTH = """
-import contextlib
-import json
-import threading
-
-ACCESS_TOKEN_PREFIX = "oat_"
-_refresh_lock = threading.Lock()
-
-
-@contextlib.contextmanager
-def _config_refresh_lock(path):
-    yield
-
-
-def _read_config_strict(path):
-    return json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
-"""
     _HOSTPROV_SCHEMA = """
 from plugins.memory.config_schema import (
-    KIND_SECRET, KIND_SELECT, KIND_TEXT, STORAGE_HONCHO_HOST_BLOCK, ProviderConfigSchema, ProviderField,
+    KIND_SECRET, KIND_SELECT, KIND_TEXT, STORAGE_PROVIDER, ProviderConfigSchema, ProviderField,
     ProviderFieldOption,
 )
 
 CONFIG_SCHEMA = ProviderConfigSchema(
     name="hostprov",
     label="Host-block Provider",
-    storage=STORAGE_HONCHO_HOST_BLOCK,
+    storage=STORAGE_PROVIDER,
     fields=(
         ProviderField(key="apiKey", label="API key", kind=KIND_SECRET, description="", env_key="HOSTPROV_API_KEY"),
         ProviderField(key="baseUrl", label="Base URL", kind=KIND_TEXT, description="", scope="root"),
@@ -854,14 +849,13 @@ CONFIG_SCHEMA = ProviderConfigSchema(
 
         plugin_dir = get_hermes_home() / "plugins" / "hostprov"
         plugin_dir.mkdir(parents=True, exist_ok=True)
-        for module, source in (("__init__", self._HOSTPROV_INIT), ("client", self._HOSTPROV_CLIENT),
-                               ("oauth", self._HOSTPROV_OAUTH), ("config_schema", self._HOSTPROV_SCHEMA)):
+        for module, source in (("__init__", self._HOSTPROV_INIT), ("config_schema", self._HOSTPROV_SCHEMA)):
             (plugin_dir / f"{module}.py").write_text(source, encoding="utf-8")
         config_path = get_hermes_home() / "hostprov.json"
         config_path.write_text("{}", encoding="utf-8")
         return config_path
 
-    def test_put_host_block_writes_host_block_root_and_secret(self):
+    def test_put_provider_storage_writes_through_the_provider(self):
         from hermes_cli.config import load_config, load_env
 
         config_path = self._install_hostprov()
@@ -896,7 +890,7 @@ CONFIG_SCHEMA = ProviderConfigSchema(
         assert cfg["hosts"]["hermes"]["apiKey"] == "hch-test-key"
 
 
-    def test_get_host_block_config_does_not_return_secret(self):
+    def test_get_provider_storage_config_does_not_return_secret(self):
         self._install_hostprov()
         self.client.put(
             "/api/memory/providers/hostprov/config?surface=declared",
@@ -911,25 +905,31 @@ CONFIG_SCHEMA = ProviderConfigSchema(
         assert fields["apiKey"]["is_set"] is True
         assert fields["apiKey"]["value"] == ""
         assert "secret-value" not in json.dumps(data)
+        # Blank fields show what the provider resolves them to.
+        assert fields["workspace"]["placeholder"] == "hermes"
+        assert fields["workspace"]["is_set"] is False
 
 
     @pytest.mark.parametrize("corrupt", [True, False], ids=["unparseable-file-is-left-alone", "parseable-file-is-merged"])
-    def test_put_host_block_never_replaces_an_unparseable_config(self, corrupt):
-        # The router reads the provider's config strictly: a file that exists but does not parse must
-        # not be replaced by this host's block alone (that would wipe every other host's keys).
+    def test_put_provider_storage_never_replaces_an_unparseable_config(self, corrupt):
+        # A provider that refuses (its file does not parse) gets a 400 and no ``memory.provider`` switch:
+        # replacing the file with this host's block alone would wipe every other host's keys.
         from hermes_cli.config import load_config
+
+        from hermes_cli.config import load_env
 
         config_path = self._install_hostprov()
         before = "{not json" if corrupt else json.dumps({"hosts": {"other": {"apiKey": "keep-me"}}})
         config_path.write_text(before, encoding="utf-8")
 
         resp = self.client.put("/api/memory/providers/hostprov/config?surface=declared",
-                               json={"values": {"workspace": "myws"}})
+                               json={"values": {"workspace": "myws", "apiKey": "hch-new-key"}})
 
         if corrupt:
             assert resp.status_code == 400
             assert config_path.read_text(encoding="utf-8") == before
             assert (load_config().get("memory") or {}).get("provider") != "hostprov"
+            assert "HOSTPROV_API_KEY" not in load_env()  # a refused save writes no secret either
             return
         assert resp.status_code == 200
         cfg = json.loads(config_path.read_text(encoding="utf-8"))
