@@ -739,13 +739,13 @@ def _classify_summary_failure(e: Exception) -> _SummaryFailureKind:
         json_decode=isinstance(e, json.JSONDecodeError) or "expecting value" in err,
         # httpx premature-close errors are transient; treat like a timeout, not a 60s cooldown.
         streaming_closed=_is_connection_error(e) and not stall,
-        # HTTP 200 with empty body from a degraded provider, plus the sibling "no usable response"
-        # shapes from _validate_llm_response.
-        empty_content=isinstance(e, RuntimeError) and any(
+        # HTTP 200 with empty body from a degraded provider, the sibling "no usable response" shapes from
+        # _validate_llm_response, and Gemini's prompt block of the summary request (once empty content).
+        empty_content=getattr(e, "code", None) == "gemini_prompt_blocked" or (isinstance(e, RuntimeError) and any(
             m in err for m in (
                 "empty content", "refusal content", "llm returned none response", "llm returned invalid response",
             )
-        ),
+        )),
         # Truncated summary: one main-model retry, then ABORT preserving the session.
         truncated=isinstance(e, RuntimeError) and _TRUNCATED_SUMMARY_MARKER in err,
         overloaded=classify_api_error(e).reason is FailoverReason.overloaded
