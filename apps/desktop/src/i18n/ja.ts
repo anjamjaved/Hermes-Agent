@@ -3285,6 +3285,12 @@ export const jaOverrides = {
   },
 
   assistant: {
+    mcpSetup: {
+      launchCommand: target => `実行: ${target}`,
+      launchRemote: target => `接続先: ${target}`,
+      launchEnv: keys => `環境変数: ${keys}`,
+      launchCwd: dir => `作業ディレクトリ: ${dir}`
+    },
     catalogInstall: {
       preparing: 'インストールを準備中…',
       install: 'インストール',
