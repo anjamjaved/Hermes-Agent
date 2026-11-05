@@ -1,6 +1,6 @@
 import * as sdk from '@hermes/plugin-sdk'
 import { Codicon, Tip } from '@hermes/plugin-sdk'
-import { Fragment, type ReactNode, useEffect, useRef, useState } from 'react'
+import { Fragment, type ReactNode, useEffect, useMemo, useRef, useState } from 'react'
 
 import { type CanonicalGroupAttachment, CanonicalGroupAttachments, fetchCanonicalGroupAttachment } from './canonical-group-attachments'
 import { useCanonicalGroupLabels } from './canonical-group-labels'
@@ -169,13 +169,19 @@ function ImagePreview({ binding, eventId, attachment, disabled }: {
 export function CanonicalGroupHistory({ avatarFor, binding, events, members = [], disabled = false, onReply }: CanonicalGroupHistoryProps) {
   const labels = useCanonicalGroupLabels()
   const roster = new Map(members.map(member => [member.member_id, member]))
-  const handoffsAfter = new Map<number, RoomHandoff[]>()
 
-  for (const handoff of roomHandoffs(events as RoomLogEvent[], members)) {
-    const after = handoffsAfter.get(handoff.afterSeq)
+  // One members × events scan per log or roster change, not per render.
+  const handoffsAfter = useMemo(() => {
+    const byEvent = new Map<number, RoomHandoff[]>()
 
-    if (after) {after.push(handoff)} else {handoffsAfter.set(handoff.afterSeq, [handoff])}
-  }
+    for (const handoff of roomHandoffs(events as RoomLogEvent[], members)) {
+      const after = byEvent.get(handoff.afterSeq)
+
+      if (after) {after.push(handoff)} else {byEvent.set(handoff.afterSeq, [handoff])}
+    }
+
+    return byEvent
+  }, [events, members])
 
   const nameOf = (id: string) => { const member = roster.get(id);
 
